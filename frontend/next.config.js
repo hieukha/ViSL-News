@@ -28,6 +28,16 @@ const nextConfig = {
           source: '/api/labeling/:path*',
           destination: `http://localhost:${BACKEND_PORT}/api/labeling/:path*`,
         },
+        // Video files - sentence clips
+        {
+          source: '/api/video/:path*',
+          destination: `http://localhost:${BACKEND_PORT}/videos/:path*`,
+        },
+        // Signer videos
+        {
+          source: '/api/signer-video/:path*',
+          destination: `http://localhost:${BACKEND_PORT}/signer-videos/:path*`,
+        },
         // Health check
         {
           source: '/api/health',

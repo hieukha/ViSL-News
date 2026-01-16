@@ -18,15 +18,19 @@ class SegmentBase(BaseModel):
     asr_text: Optional[str] = None
     split: str = "train"
     status: str = "raw"
+    review_comment: Optional[str] = None  # Admin feedback when needs_fix
 
 
 class SegmentCreate(SegmentBase):
     video_id: Optional[int] = None
+    dataset_id: Optional[int] = None
 
 
 class SegmentResponse(SegmentBase):
     id: int
+    dataset_id: Optional[int] = None
     video_id: Optional[int] = None
+    is_last_segment: bool = False
     created_at: datetime
     latest_annotation: Optional["AnnotationResponse"] = None
 
@@ -58,6 +62,8 @@ class AnnotationResponse(AnnotationBase):
     id: int
     segment_id: int
     expert_id: Optional[int] = None
+    expert_name: Optional[str] = None  # Tên người gán nhãn
+    version: int = 1  # Version number for history tracking
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -69,8 +75,9 @@ class AnnotationResponse(AnnotationBase):
 class StatsResponse(BaseModel):
     total_segments: int
     raw_count: int
-    in_progress_count: int
-    labeled_count: int
+    in_progress_count: int = 0  # Deprecated
+    labeled_count: int  # expert_labeled
+    needs_fix_count: int = 0  # needs_fix
     reviewed_count: int
     train_count: int
     val_count: int

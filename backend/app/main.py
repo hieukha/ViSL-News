@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .core.config import CORS_ORIGINS, VIDEO_DIR, SIGNER_CLIPS_DIR
 from .core.database import engine, Base
-from .models import User, Video, Segment, Annotation
+from .models import User, Video, Segment, Annotation, CollectingTask
 
 # Import routers
 from .modules.auth import router as auth_router

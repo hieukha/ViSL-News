@@ -128,3 +128,7 @@ async def get_admin_user(
         )
     return current_user
 
+
+# Alias for optional user (same as get_current_user but more explicit name)
+get_current_user_optional = get_current_user
+

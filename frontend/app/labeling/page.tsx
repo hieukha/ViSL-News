@@ -11,32 +11,48 @@ import {
   CheckCircle, 
   ChevronLeft,
   ChevronRight,
-  BarChart3,
   Clock,
   FileText,
-  Users,
-  Zap,
   RefreshCw,
   Volume2,
   VolumeX,
-  Maximize2,
   AlertCircle,
   ArrowLeft,
-  Home,
-  Tag
+  Tag,
+  Check,
+  X,
+  History,
+  User,
+  Database,
+  MessageSquare,
+  AlertTriangle,
+  Shield,
+  Trash2
 } from 'lucide-react'
+
+interface Dataset {
+  id: number
+  name: string
+  description: string | null
+  segment_count: number
+  raw_count: number
+  labeled_count: number
+  needs_fix_count: number
+  reviewed_count: number
+}
 
 interface Segment {
   id: number
   clip_name: string
   clip_path: string
-  video_source: string  // Video gốc (signer video)
+  video_source: string
   start_time: number
   end_time: number
   duration: number
   asr_text: string
   status: string
   split: string
+  review_comment?: string
   latest_annotation?: Annotation
 }
 
@@ -47,6 +63,10 @@ interface Annotation {
   start_time: number
   end_time: number
   comment: string
+  version: number
+  expert_id?: number
+  expert_name?: string
+  created_at: string
 }
 
 interface Stats {
@@ -54,6 +74,7 @@ interface Stats {
   raw_count: number
   in_progress_count: number
   labeled_count: number
+  needs_fix_count: number
   reviewed_count: number
   train_count: number
   val_count: number
@@ -64,59 +85,24 @@ interface Stats {
 
 const API_BASE = '/backend-api'
 
-// Mock data để test khi chưa có backend
-const MOCK_SEGMENTS: Segment[] = [
-  {
-    id: 1,
-    clip_name: 'coca-cola-viet-nam-tiep-tuc-khang-dinh-thuong-hieu-nha-tuyen-dung-cua-minh-0',
-    clip_path: 'sentence_clips/coca-cola-viet-nam-tiep-tuc-khang-dinh-thuong-hieu-nha-tuyen-dung-cua-minh-0.mp4',
-    video_source: 'signer_clips/signer_coca-cola-viet-nam-tiep-tuc-khang-dinh-thuong-hieu-nha-tuyen-dung-cua-minh.mp4',
-    start_time: 0.031,
-    end_time: 12.117,
-    duration: 14.0,
-    asr_text: 'Tự hào là một phần trong cuộc sống của nhiều thế hệ người tiêu dùng Việt Nam, Coca-Cola Việt Nam còn tiếp tục khẳng định thương hiệu nhà tuyển dụng của mình khi trở thành một cái tên tiêu biểu cho văn hóa doanh nghiệp, lấy con người làm trọng tâm.',
-    status: 'raw',
-    split: 'train'
-  },
-  {
-    id: 2,
-    clip_name: 'coca-cola-viet-nam-tiep-tuc-khang-dinh-thuong-hieu-nha-tuyen-dung-cua-minh-1',
-    clip_path: 'sentence_clips/coca-cola-viet-nam-tiep-tuc-khang-dinh-thuong-hieu-nha-tuyen-dung-cua-minh-1.mp4',
-    video_source: 'signer_clips/signer_coca-cola-viet-nam-tiep-tuc-khang-dinh-thuong-hieu-nha-tuyen-dung-cua-minh.mp4',
-    start_time: 14.071,
-    end_time: 24.95,
-    duration: 12.0,
-    asr_text: 'Công ty đã liên tục nhiều năm liền được công nhận với giải thưởng nơi làm việc tốt nhất châu Á.',
-    status: 'raw',
-    split: 'train'
-  }
-]
-
-const MOCK_STATS: Stats = {
-  total_segments: 78,
-  raw_count: 65,
-  in_progress_count: 3,
-  labeled_count: 8,
-  reviewed_count: 2,
-  train_count: 60,
-  val_count: 10,
-  test_count: 8,
-  total_annotations: 10,
-  avg_duration: 9.5
-}
-
-// Set to true to use mock data (when backend is not running)
-const USE_MOCK_DATA = false
-
 export default function LabelingPage() {
-  // State
+  // Auth State
+  const [userRole, setUserRole] = useState<string>('annotator')
+  const [userName, setUserName] = useState<string>('')
+  const [isLoggedIn, setIsLoggedIn] = useState(false)
+  
+  // Dataset State
+  const [datasets, setDatasets] = useState<Dataset[]>([])
+  const [selectedDataset, setSelectedDataset] = useState<number | null>(null)
+  
+  // Segments State
   const [segments, setSegments] = useState<Segment[]>([])
   const [currentSegment, setCurrentSegment] = useState<Segment | null>(null)
   const [currentIndex, setCurrentIndex] = useState(0)
   const [stats, setStats] = useState<Stats | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null)
   
   // Video player state
   const [isPlaying, setIsPlaying] = useState(false)
@@ -133,39 +119,78 @@ export default function LabelingPage() {
   const [endTime, setEndTime] = useState(0)
   const [comment, setComment] = useState('')
   
+  // Admin review state
+  const [reviewComment, setReviewComment] = useState('')
+  const [showRejectModal, setShowRejectModal] = useState(false)
+  
+  // Delete dataset state
+  const [showDeleteDatasetModal, setShowDeleteDatasetModal] = useState(false)
+  const [deleteWithFiles, setDeleteWithFiles] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+  
+  // Annotation history
+  const [annotationHistory, setAnnotationHistory] = useState<Annotation[]>([])
+  const [showHistory, setShowHistory] = useState(false)
+  
   // Filter state
   const [statusFilter, setStatusFilter] = useState<string>('raw')
   const [splitFilter, setSplitFilter] = useState<string>('')
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
 
-  // Fetch segments
+  // Check auth on mount
+  useEffect(() => {
+    const token = localStorage.getItem('access_token')
+    const user = localStorage.getItem('user')
+    if (token && user) {
+      try {
+        const userData = JSON.parse(user)
+        setIsLoggedIn(true)
+        setUserRole(userData.role || 'annotator')
+        setUserName(userData.full_name || userData.email || '')
+      } catch {
+        setIsLoggedIn(false)
+      }
+    }
+  }, [])
+
+  // Fetch datasets on mount
+  useEffect(() => {
+    fetchDatasets()
+  }, [])
+
+  // Fetch segments when dataset/filters change
+  useEffect(() => {
+    fetchSegments()
+    fetchStats()
+  }, [page, statusFilter, splitFilter, selectedDataset])
+
+  // Fetch annotation history when segment changes
+  useEffect(() => {
+    if (currentSegment) {
+      fetchAnnotationHistory(currentSegment.id)
+    }
+  }, [currentSegment?.id])
+
+  const fetchDatasets = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/datasets`)
+      if (res.ok) {
+        const data = await res.json()
+        setDatasets(data)
+      }
+    } catch (error) {
+      console.error('Error fetching datasets:', error)
+    }
+  }
+
   const fetchSegments = async () => {
     setLoading(true)
-    
-    if (USE_MOCK_DATA) {
-      let filtered = MOCK_SEGMENTS
-      if (statusFilter) {
-        filtered = filtered.filter(s => s.status === statusFilter)
-      }
-      if (splitFilter) {
-        filtered = filtered.filter(s => s.split === splitFilter)
-      }
-      
-      setSegments(filtered)
-      setTotalPages(1)
-      
-      if (filtered.length > 0 && !currentSegment) {
-        selectSegment(filtered[0], 0)
-      }
-      setLoading(false)
-      return
-    }
-    
     try {
       const params = new URLSearchParams({ page: page.toString(), per_page: '20' })
       if (statusFilter) params.append('status', statusFilter)
       if (splitFilter) params.append('split', splitFilter)
+      if (selectedDataset) params.append('dataset_id', selectedDataset.toString())
       
       const res = await fetch(`${API_BASE}/segments?${params}`)
       
@@ -190,15 +215,11 @@ export default function LabelingPage() {
     setLoading(false)
   }
 
-  // Fetch stats
   const fetchStats = async () => {
-    if (USE_MOCK_DATA) {
-      setStats(MOCK_STATS)
-      return
-    }
-    
     try {
-      const res = await fetch(`${API_BASE}/stats`)
+      const params = new URLSearchParams()
+      if (selectedDataset) params.append('dataset_id', selectedDataset.toString())
+      const res = await fetch(`${API_BASE}/stats?${params}`)
       const data = await res.json()
       setStats(data)
     } catch (error) {
@@ -206,13 +227,25 @@ export default function LabelingPage() {
     }
   }
 
-  useEffect(() => {
-    fetchSegments()
-    fetchStats()
-  }, [page, statusFilter, splitFilter])
+  const fetchAnnotationHistory = async (segmentId: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/annotations/${segmentId}`)
+      if (res.ok) {
+        const data = await res.json()
+        setAnnotationHistory(data)
+      }
+    } catch (error) {
+      console.error('Error fetching annotation history:', error)
+    }
+  }
 
-  // Select segment
   const selectSegment = (segment: Segment, index: number) => {
+    // Determine the target start time for this segment
+    const targetStartTime = segment.latest_annotation?.start_time || segment.start_time
+    
+    // Check if video source changed (need to wait for video load)
+    const videoSourceChanged = !currentSegment || currentSegment.video_source !== segment.video_source
+    
     setCurrentSegment(segment)
     setCurrentIndex(index)
     
@@ -231,11 +264,33 @@ export default function LabelingPage() {
       setComment('')
     }
     
+    // Reset review comment
+    setReviewComment('')
     setIsPlaying(false)
-    setCurrentTime(0)
+    setCurrentTime(targetStartTime)
+    
+    // Seek video to target start time
+    if (videoSourceChanged) {
+      // Video source changed - the seek will happen in handleLoadedMetadata via pendingSeekTime
+      // Store the target time in a data attribute on the video element as a workaround
+      if (videoRef) {
+        videoRef.dataset.pendingSeek = targetStartTime.toString()
+      }
+    } else {
+      // Same video source - seek immediately (video is already loaded)
+      if (videoRef && videoRef.readyState >= 1) {
+        videoRef.currentTime = targetStartTime
+      } else {
+        // Video not ready yet, try after a short delay
+        setTimeout(() => {
+          if (videoRef) {
+            videoRef.currentTime = targetStartTime
+          }
+        }, 50)
+      }
+    }
   }
 
-  // Navigation
   const goToNext = () => {
     if (currentIndex < segments.length - 1) {
       selectSegment(segments[currentIndex + 1], currentIndex + 1)
@@ -254,7 +309,6 @@ export default function LabelingPage() {
     }
   }
 
-  // Reset to original values
   const resetToOriginal = () => {
     if (!currentSegment) return
     
@@ -268,34 +322,30 @@ export default function LabelingPage() {
     showToast('Đã reset về giá trị ban đầu', 'success')
   }
 
-  // Save annotation
+  // Annotator: Save annotation
   const saveAnnotation = async () => {
     if (!currentSegment) return
     
-    setSaving(true)
-    
-    if (USE_MOCK_DATA) {
-      await new Promise(resolve => setTimeout(resolve, 500))
-      showToast('Đã lưu thành công! (Mock mode)', 'success')
-      
-      const updatedSegments = [...segments]
-      updatedSegments[currentIndex] = {
-        ...updatedSegments[currentIndex],
-        status: 'expert_labeled'
-      }
-      setSegments(updatedSegments)
-      
-      setTimeout(() => {
-        goToNext()
-      }, 1000)
-      setSaving(false)
+    if (!isLoggedIn) {
+      showToast('Vui lòng đăng nhập để gán nhãn', 'error')
       return
     }
     
+    if (userRole === 'admin') {
+      showToast('Admin không có quyền gán nhãn, chỉ có quyền duyệt', 'warning')
+      return
+    }
+    
+    setSaving(true)
+    
     try {
+      const token = localStorage.getItem('access_token')
       const res = await fetch(`${API_BASE}/annotations`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({
           segment_id: currentSegment.id,
           final_text: finalText,
@@ -309,25 +359,170 @@ export default function LabelingPage() {
       if (res.ok) {
         showToast('Đã lưu thành công!', 'success')
         
+        // Update local segment status
         const updatedSegments = [...segments]
         updatedSegments[currentIndex] = {
           ...updatedSegments[currentIndex],
-          status: 'expert_labeled'
+          status: 'expert_labeled',
+          review_comment: undefined
         }
         setSegments(updatedSegments)
+        setCurrentSegment({ ...currentSegment, status: 'expert_labeled', review_comment: undefined })
         
         fetchStats()
+        fetchAnnotationHistory(currentSegment.id)
         
-        setTimeout(() => {
-          goToNext()
-        }, 1000)
+        // Go to next after 1 second
+        setTimeout(() => goToNext(), 1000)
       } else {
-        showToast('Lỗi khi lưu dữ liệu', 'error')
+        const error = await res.json()
+        showToast(error.detail || 'Lỗi khi lưu dữ liệu', 'error')
       }
     } catch (error) {
       showToast('Lỗi kết nối server', 'error')
     }
     setSaving(false)
+  }
+
+  // Admin: Approve segment
+  const approveSegment = async () => {
+    if (!currentSegment) return
+    
+    if (userRole !== 'admin') {
+      showToast('Chỉ Admin mới có quyền duyệt', 'error')
+      return
+    }
+    
+    setSaving(true)
+    
+    try {
+      const token = localStorage.getItem('access_token')
+      const res = await fetch(`${API_BASE}/segments/${currentSegment.id}/review/approve`, {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      
+      if (res.ok) {
+        showToast('Đã duyệt segment!', 'success')
+        
+        // Update local segment status
+        const updatedSegments = [...segments]
+        updatedSegments[currentIndex] = {
+          ...updatedSegments[currentIndex],
+          status: 'reviewed',
+          review_comment: undefined
+        }
+        setSegments(updatedSegments)
+        setCurrentSegment({ ...currentSegment, status: 'reviewed', review_comment: undefined })
+        
+        fetchStats()
+        
+        // Go to next after 1 second
+        setTimeout(() => goToNext(), 1000)
+      } else {
+        const error = await res.json()
+        showToast(error.detail || 'Lỗi khi duyệt', 'error')
+      }
+    } catch (error) {
+      showToast('Lỗi kết nối server', 'error')
+    }
+    setSaving(false)
+  }
+
+  // Admin: Reject segment
+  const rejectSegment = async () => {
+    if (!currentSegment) return
+    
+    if (userRole !== 'admin') {
+      showToast('Chỉ Admin mới có quyền trả về', 'error')
+      return
+    }
+    
+    setSaving(true)
+    
+    try {
+      const token = localStorage.getItem('access_token')
+      const res = await fetch(`${API_BASE}/segments/${currentSegment.id}/review/reject`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          comment: reviewComment
+        })
+      })
+      
+      if (res.ok) {
+        showToast('Đã trả về để sửa!', 'warning')
+        setShowRejectModal(false)
+        
+        // Update local segment status
+        const updatedSegments = [...segments]
+        updatedSegments[currentIndex] = {
+          ...updatedSegments[currentIndex],
+          status: 'needs_fix',
+          review_comment: reviewComment
+        }
+        setSegments(updatedSegments)
+        setCurrentSegment({ ...currentSegment, status: 'needs_fix', review_comment: reviewComment })
+        
+        fetchStats()
+        
+        // Go to next after 1 second
+        setTimeout(() => goToNext(), 1000)
+      } else {
+        const error = await res.json()
+        showToast(error.detail || 'Lỗi khi trả về', 'error')
+      }
+    } catch (error) {
+      showToast('Lỗi kết nối server', 'error')
+    }
+    setSaving(false)
+    setReviewComment('')
+  }
+
+  // Admin: Delete dataset
+  const deleteDataset = async () => {
+    if (!selectedDataset) return
+    
+    if (userRole !== 'admin') {
+      showToast('Chỉ Admin mới có quyền xóa dataset', 'error')
+      return
+    }
+    
+    setIsDeleting(true)
+    
+    try {
+      const token = localStorage.getItem('access_token')
+      const res = await fetch(`${API_BASE}/datasets/${selectedDataset}?delete_files=${deleteWithFiles}`, {
+        method: 'DELETE',
+        headers: { 
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      
+      if (res.ok) {
+        const data = await res.json()
+        const resetMsg = data.sequence_reset ? ' (ID đã reset về 1)' : ''
+        showToast(`Đã xóa dataset: ${data.segments_deleted} segments, ${data.annotations_deleted} annotations${deleteWithFiles ? `, ${data.files_deleted} files` : ''}${resetMsg}`, 'success')
+        setShowDeleteDatasetModal(false)
+        setSelectedDataset(null)
+        setCurrentSegment(null)
+        setSegments([])
+        fetchDatasets()
+        fetchStats()
+      } else {
+        const error = await res.json()
+        showToast(error.detail || 'Lỗi khi xóa dataset', 'error')
+      }
+    } catch (error) {
+      showToast('Lỗi kết nối server', 'error')
+    }
+    setIsDeleting(false)
+    setDeleteWithFiles(false)
   }
 
   // Video controls
@@ -352,6 +547,20 @@ export default function LabelingPage() {
     if (videoRef) {
       setVideoDuration(videoRef.duration)
       videoRef.playbackRate = playbackRate
+      
+      // Check for pending seek time (set when video source changed)
+      const pendingSeek = videoRef.dataset.pendingSeek
+      if (pendingSeek) {
+        const seekTime = parseFloat(pendingSeek)
+        videoRef.currentTime = seekTime
+        setCurrentTime(seekTime)
+        delete videoRef.dataset.pendingSeek // Clear the pending seek
+      } else if (currentSegment) {
+        // Fallback: seek to segment's start time
+        const targetTime = startTime || currentSegment.start_time
+        videoRef.currentTime = targetTime
+        setCurrentTime(targetTime)
+      }
     }
   }
 
@@ -362,7 +571,6 @@ export default function LabelingPage() {
     }
   }
 
-  // Change playback speed
   const changePlaybackRate = (rate: number) => {
     setPlaybackRate(rate)
     if (videoRef) {
@@ -377,13 +585,11 @@ export default function LabelingPage() {
     changePlaybackRate(speeds[nextIdx])
   }
 
-  // Toast
-  const showToast = (message: string, type: 'success' | 'error') => {
+  const showToast = (message: string, type: 'success' | 'error' | 'warning') => {
     setToast({ message, type })
     setTimeout(() => setToast(null), 3000)
   }
 
-  // Format time
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
@@ -391,12 +597,24 @@ export default function LabelingPage() {
     return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`
   }
 
+  const formatDateTime = (dateStr: string) => {
+    const date = new Date(dateStr)
+    return date.toLocaleString('vi-VN', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  }
+
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'raw': return 'bg-dark-700 text-dark-300'
       case 'in_progress': return 'bg-yellow-500/20 text-yellow-400'
-      case 'expert_labeled': return 'bg-green-500/20 text-green-400'
-      case 'reviewed': return 'bg-blue-500/20 text-blue-400'
+      case 'expert_labeled': return 'bg-orange-500/20 text-orange-400'
+      case 'needs_fix': return 'bg-red-500/20 text-red-400'
+      case 'reviewed': return 'bg-green-500/20 text-green-400'
       default: return 'bg-dark-700 text-dark-300'
     }
   }
@@ -406,10 +624,15 @@ export default function LabelingPage() {
       case 'raw': return 'Chưa label'
       case 'in_progress': return 'Đang xử lý'
       case 'expert_labeled': return 'Đã label'
-      case 'reviewed': return 'Đã review'
+      case 'needs_fix': return 'Cần sửa'
+      case 'reviewed': return 'Đã duyệt'
       default: return status
     }
   }
+
+  const isAdmin = userRole === 'admin'
+  const canLabel = isLoggedIn && !isAdmin && currentSegment && currentSegment.status !== 'reviewed'
+  const canReview = isAdmin && currentSegment?.status === 'expert_labeled'
 
   return (
     <div className="min-h-screen bg-[#0a0a0b]">
@@ -431,25 +654,49 @@ export default function LabelingPage() {
               </div>
             </div>
             
-            {/* Quick Stats */}
-            {stats && (
-              <div className="flex items-center gap-4 text-xs">
-                <div className="flex items-center gap-1.5">
-                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-                  <span className="text-dark-400">Đã label:</span>
-                  <span className="font-semibold text-white">{stats.labeled_count}</span>
-                  <span className="text-dark-500">/</span>
-                  <span className="text-dark-400">{stats.total_segments}</span>
+            {/* User info & Stats */}
+            <div className="flex items-center gap-4">
+              {/* User Role Badge */}
+              {isLoggedIn && (
+                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs ${
+                  isAdmin ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'
+                }`}>
+                  {isAdmin ? <Shield className="w-3 h-3" /> : <User className="w-3 h-3" />}
+                  <span>{isAdmin ? 'Admin' : 'Annotator'}</span>
+                  {userName && <span className="text-dark-400">• {userName}</span>}
                 </div>
-                <div className="h-5 w-px bg-dark-700" />
-                <div className="flex items-center gap-1.5">
-                  <span className="text-dark-400">Tiến độ:</span>
-                  <span className="font-semibold text-brand-400">
-                    {stats.total_segments > 0 ? Math.round((stats.labeled_count / stats.total_segments) * 100) : 0}%
-                  </span>
+              )}
+              
+              {/* Quick Stats */}
+              {stats && (
+                <div className="flex items-center gap-4 text-xs">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                    <span className="text-dark-400">Đã duyệt:</span>
+                    <span className="font-semibold text-green-400">{stats.reviewed_count}</span>
+                  </div>
+                  <div className="h-5 w-px bg-dark-700" />
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-dark-400">Đã label:</span>
+                    <span className="font-semibold text-orange-400">{stats.labeled_count}</span>
+                  </div>
+                  {stats.needs_fix_count > 0 && (
+                    <>
+                      <div className="h-5 w-px bg-dark-700" />
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-dark-400">Cần sửa:</span>
+                        <span className="font-semibold text-red-400">{stats.needs_fix_count}</span>
+                      </div>
+                    </>
+                  )}
+                  <div className="h-5 w-px bg-dark-700" />
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-dark-400">Tổng:</span>
+                    <span className="font-semibold text-white">{stats.total_segments}</span>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -459,6 +706,42 @@ export default function LabelingPage() {
           
           {/* Sidebar - Segment List */}
           <aside className="col-span-3 flex flex-col h-[calc(100vh-140px)]">
+            {/* Dataset Selector */}
+            <div className="bg-dark-950 border border-dark-800 rounded-xl p-3 mb-3 flex-shrink-0">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Database className="w-4 h-4 text-dark-400" />
+                  <span className="text-xs font-medium text-dark-400">Dataset</span>
+                </div>
+                {/* Admin: Delete dataset button */}
+                {isAdmin && selectedDataset && (
+                  <button
+                    onClick={() => setShowDeleteDatasetModal(true)}
+                    className="p-1 hover:bg-red-500/20 rounded transition-colors text-red-400"
+                    title="Xóa dataset"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              <select
+                value={selectedDataset || ''}
+                onChange={(e) => { 
+                  setSelectedDataset(e.target.value ? parseInt(e.target.value) : null)
+                  setPage(1)
+                  setCurrentSegment(null)
+                }}
+                className="w-full px-2 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-xs text-white"
+              >
+                <option value="">Tất cả dataset</option>
+                {datasets.map(ds => (
+                  <option key={ds.id} value={ds.id}>
+                    {ds.name} ({ds.segment_count} segments)
+                  </option>
+                ))}
+              </select>
+            </div>
+            
             {/* Filters */}
             <div className="bg-dark-950 border border-dark-800 rounded-xl p-3 mb-3 flex-shrink-0">
               <div className="flex gap-2">
@@ -469,9 +752,9 @@ export default function LabelingPage() {
                 >
                   <option value="">Tất cả trạng thái</option>
                   <option value="raw">Chưa label</option>
-                  <option value="in_progress">Đang xử lý</option>
                   <option value="expert_labeled">Đã label</option>
-                  <option value="reviewed">Đã review</option>
+                  <option value="needs_fix">Cần sửa</option>
+                  <option value="reviewed">Đã duyệt</option>
                 </select>
                 <select
                   value={splitFilter}
@@ -502,6 +785,12 @@ export default function LabelingPage() {
                       <div key={i} className="h-14 skeleton rounded-lg" />
                     ))}
                   </div>
+                ) : segments.length === 0 ? (
+                  <div className="p-6 text-center">
+                    <FileText className="w-8 h-8 text-dark-600 mx-auto mb-2" />
+                    <p className="text-xs text-dark-500">Không có segment nào</p>
+                    <p className="text-[10px] text-dark-600 mt-1">Thay đổi bộ lọc hoặc chọn dataset khác</p>
+                  </div>
                 ) : (
                   <div className="divide-y divide-dark-800/50">
                     {segments.map((segment, index) => (
@@ -513,7 +802,7 @@ export default function LabelingPage() {
                         }`}
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[10px] font-mono text-dark-500">#{segment.id}</span>
+                          <span className="text-[10px] font-mono text-dark-500">#{(page - 1) * 20 + index + 1}</span>
                           <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${getStatusColor(segment.status)}`}>
                             {getStatusText(segment.status)}
                           </span>
@@ -524,6 +813,12 @@ export default function LabelingPage() {
                         <div className="mt-1 flex items-center gap-1.5 text-[10px] text-dark-500">
                           <Clock className="w-2.5 h-2.5" />
                           <span>{segment.duration?.toFixed(1)}s</span>
+                          {segment.review_comment && (
+                            <>
+                              <span className="text-dark-700">•</span>
+                              <MessageSquare className="w-2.5 h-2.5 text-red-400" />
+                            </>
+                          )}
                         </div>
                       </button>
                     ))}
@@ -540,10 +835,10 @@ export default function LabelingPage() {
                 >
                   <ChevronLeft className="w-3.5 h-3.5" />
                 </button>
-                <span className="text-[10px] text-dark-500">{page}/{totalPages}</span>
+                <span className="text-[10px] text-dark-500">{page}/{totalPages || 1}</span>
                 <button
                   onClick={() => setPage(Math.min(totalPages, page + 1))}
-                  disabled={page === totalPages}
+                  disabled={page === totalPages || totalPages === 0}
                   className="p-1 hover:bg-dark-800 rounded transition-colors disabled:opacity-50"
                 >
                   <ChevronRight className="w-3.5 h-3.5" />
@@ -559,11 +854,11 @@ export default function LabelingPage() {
                 {/* Left: Video Player with Timeline */}
                 <div className="col-span-2 flex flex-col">
                   <div className="bg-dark-950 border border-dark-800 rounded-xl overflow-hidden flex-1 flex flex-col">
-                    {/* Video */}
+                    {/* Video - Load signer video (full video containing all sentences) */}
                     <div className="h-[260px] bg-black relative flex-shrink-0">
                       <video
                         ref={(el) => setVideoRef(el)}
-                        src={`/api/video/${currentSegment.video_source}`}
+                        src={`/api/signer-video/${currentSegment.video_source}`}
                         className="w-full h-full object-contain"
                         onTimeUpdate={handleTimeUpdate}
                         onLoadedMetadata={handleLoadedMetadata}
@@ -734,21 +1029,74 @@ export default function LabelingPage() {
                   </div>
                 </div>
 
-                {/* Right: Annotation Form */}
+                {/* Right: Annotation Form & Admin Actions */}
                 <div className="col-span-3 bg-dark-950 border border-dark-800 rounded-xl p-4 flex flex-col">
                   <div className="flex items-center justify-between mb-3 flex-shrink-0">
-                    <h2 className="text-base font-semibold">Căn chỉnh dữ liệu</h2>
-                    <div className={`px-2 py-0.5 rounded-full text-xs ${getStatusColor(currentSegment.status)}`}>
-                      {getStatusText(currentSegment.status)}
+                    <h2 className="text-base font-semibold">
+                      {isAdmin ? 'Xem & Duyệt dữ liệu' : 'Căn chỉnh dữ liệu'}
+                    </h2>
+                    <div className="flex items-center gap-2">
+                      <div className={`px-2 py-0.5 rounded-full text-xs ${getStatusColor(currentSegment.status)}`}>
+                        {getStatusText(currentSegment.status)}
+                      </div>
+                      <button
+                        onClick={() => setShowHistory(!showHistory)}
+                        className={`p-1.5 rounded-lg transition-colors ${showHistory ? 'bg-brand-500/20 text-brand-400' : 'hover:bg-dark-800 text-dark-400'}`}
+                        title="Lịch sử gán nhãn"
+                      >
+                        <History className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
-                  
-                  <div className="space-y-3 flex-1">
-                    <div className="p-2 bg-dark-900/50 rounded-lg text-xs text-dark-500 space-y-1">
-                      <div className="flex gap-2"><span className="text-dark-400 flex-shrink-0">ID:</span> <span className="font-mono">#{currentSegment.id}</span></div>
-                      <div className="flex gap-2"><span className="text-dark-400 flex-shrink-0">Clip:</span> <span className="font-mono text-dark-300">{currentSegment.clip_name}</span></div>
-                      <div className="flex gap-2"><span className="text-dark-400 flex-shrink-0">Duration:</span> <span className="font-mono">{currentSegment.duration?.toFixed(2)}s</span></div>
+
+                  {/* Review Comment Warning */}
+                  {currentSegment.review_comment && currentSegment.status === 'needs_fix' && (
+                    <div className="mb-3 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex-shrink-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <AlertTriangle className="w-4 h-4 text-red-400" />
+                        <span className="text-xs font-medium text-red-400">Phản hồi từ Admin:</span>
+                      </div>
+                      <p className="text-xs text-red-300">{currentSegment.review_comment}</p>
                     </div>
+                  )}
+                  
+                  <div className="space-y-3 flex-1 overflow-auto">
+                    <div className="p-2 bg-dark-900/50 rounded-lg text-xs text-dark-500 space-y-1">
+                      <div className="flex gap-2"><span className="text-dark-400 flex-shrink-0">STT:</span> <span className="font-mono">#{(page - 1) * 20 + currentIndex + 1}</span></div>
+                      <div className="flex gap-2"><span className="text-dark-400 flex-shrink-0">Clip:</span> <span className="font-mono text-dark-300 truncate">{currentSegment.clip_name}</span></div>
+                      <div className="flex gap-2"><span className="text-dark-400 flex-shrink-0">Duration:</span> <span className="font-mono">{currentSegment.duration?.toFixed(2)}s</span></div>
+                      {currentSegment.latest_annotation?.expert_name && (
+                        <div className="flex gap-2">
+                          <span className="text-dark-400 flex-shrink-0">Người gán nhãn:</span> 
+                          <span className="font-mono text-brand-400">{currentSegment.latest_annotation.expert_name}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Annotation History Panel */}
+                    {showHistory && annotationHistory.length > 0 && (
+                      <div className="p-2 bg-dark-900/50 rounded-lg">
+                        <h4 className="text-xs font-medium text-dark-400 mb-2 flex items-center gap-1">
+                          <History className="w-3 h-3" /> Lịch sử gán nhãn ({annotationHistory.length})
+                        </h4>
+                        <div className="max-h-32 overflow-y-auto space-y-2">
+                          {annotationHistory.map((ann) => (
+                            <div key={ann.id} className="p-2 bg-dark-800/50 rounded text-[10px]">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="font-medium text-brand-400">v{ann.version}</span>
+                                <span className="text-dark-500">{formatDateTime(ann.created_at)}</span>
+                              </div>
+                              <div className="text-dark-400">
+                                <span className="text-dark-500">Bởi:</span> {ann.expert_name || 'Unknown'}
+                              </div>
+                              {ann.final_text && (
+                                <p className="text-dark-300 mt-1 line-clamp-1">{ann.final_text}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
@@ -758,7 +1106,8 @@ export default function LabelingPage() {
                           step="0.001"
                           value={startTime}
                           onChange={(e) => setStartTime(parseFloat(e.target.value))}
-                          className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white font-mono focus:border-brand-500"
+                          disabled={isAdmin}
+                          className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white font-mono focus:border-brand-500 disabled:opacity-60"
                         />
                         <p className="mt-0.5 text-[10px] text-dark-500">Gốc: {currentSegment.start_time}s</p>
                       </div>
@@ -769,7 +1118,8 @@ export default function LabelingPage() {
                           step="0.001"
                           value={endTime}
                           onChange={(e) => setEndTime(parseFloat(e.target.value))}
-                          className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white font-mono focus:border-brand-500"
+                          disabled={isAdmin}
+                          className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white font-mono focus:border-brand-500 disabled:opacity-60"
                         />
                         <p className="mt-0.5 text-[10px] text-dark-500">Gốc: {currentSegment.end_time}s</p>
                       </div>
@@ -782,7 +1132,8 @@ export default function LabelingPage() {
                           type="text"
                           value={glossSequence}
                           onChange={(e) => setGlossSequence(e.target.value)}
-                          className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white font-mono focus:border-brand-500"
+                          disabled={isAdmin}
+                          className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white font-mono focus:border-brand-500 disabled:opacity-60"
                           placeholder="VD: TÔI|ĐI|HỌC"
                         />
                       </div>
@@ -792,7 +1143,8 @@ export default function LabelingPage() {
                           type="text"
                           value={comment}
                           onChange={(e) => setComment(e.target.value)}
-                          className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white focus:border-brand-500"
+                          disabled={isAdmin}
+                          className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white focus:border-brand-500 disabled:opacity-60"
                           placeholder="Thêm ghi chú nếu cần..."
                         />
                       </div>
@@ -806,7 +1158,8 @@ export default function LabelingPage() {
                         value={finalText}
                         onChange={(e) => setFinalText(e.target.value)}
                         rows={4}
-                        className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white resize-none focus:border-brand-500"
+                        disabled={isAdmin}
+                        className="w-full px-3 py-2 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white resize-none focus:border-brand-500 disabled:opacity-60"
                         placeholder="Nhập câu tiếng Việt đã căn chỉnh..."
                       />
                     </div>
@@ -815,12 +1168,14 @@ export default function LabelingPage() {
                   {/* Actions */}
                   <div className="mt-3 pt-3 border-t border-dark-800 flex items-center justify-between flex-shrink-0">
                     <div className="flex gap-2">
-                      <button
-                        onClick={resetToOriginal}
-                        className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400 rounded-lg text-sm flex items-center gap-1"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" /> Reset
-                      </button>
+                      {!isAdmin && (
+                        <button
+                          onClick={resetToOriginal}
+                          className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400 rounded-lg text-sm flex items-center gap-1"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" /> Reset
+                        </button>
+                      )}
                       <button
                         onClick={goToPrevious}
                         disabled={currentIndex === 0 && page === 1}
@@ -836,18 +1191,61 @@ export default function LabelingPage() {
                       </button>
                     </div>
                     
-                    <button
-                      onClick={saveAnnotation}
-                      disabled={saving}
-                      className="px-5 py-2 bg-gradient-to-r from-brand-500 to-brand-600 hover:from-brand-600 hover:to-brand-700 rounded-lg text-sm flex items-center gap-2 font-medium shadow-lg shadow-brand-500/20 disabled:opacity-50"
-                    >
-                      {saving ? (
-                        <><RefreshCw className="w-4 h-4 animate-spin" /> Đang lưu...</>
-                      ) : (
-                        <><Save className="w-4 h-4" /> Lưu & Tiếp tục</>
-                      )}
-                    </button>
+                    {/* Role-based action buttons */}
+                    {isAdmin ? (
+                      /* Admin: Review buttons */
+                      <div className="flex gap-2">
+                        {canReview ? (
+                          <>
+                            <button
+                              onClick={() => setShowRejectModal(true)}
+                              disabled={saving}
+                              className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-sm flex items-center gap-2 font-medium"
+                            >
+                              <X className="w-4 h-4" /> Trả về sửa
+                            </button>
+                            <button
+                              onClick={approveSegment}
+                              disabled={saving}
+                              className="px-5 py-2 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 rounded-lg text-sm flex items-center gap-2 font-medium shadow-lg shadow-green-500/20 disabled:opacity-50"
+                            >
+                              {saving ? (
+                                <><RefreshCw className="w-4 h-4 animate-spin" /> Đang duyệt...</>
+                              ) : (
+                                <><Check className="w-4 h-4" /> Duyệt</>
+                              )}
+                            </button>
+                          </>
+                        ) : (
+                          <div className="px-4 py-2 text-xs text-dark-500">
+                            {currentSegment.status === 'raw' && '⚠️ Segment chưa được gán nhãn'}
+                            {currentSegment.status === 'needs_fix' && '⏳ Đang chờ annotator sửa'}
+                            {currentSegment.status === 'reviewed' && '✅ Đã duyệt xong'}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      /* Annotator: Save button */
+                      <button
+                        onClick={saveAnnotation}
+                        disabled={saving || !canLabel}
+                        className="px-5 py-2 bg-gradient-to-r from-brand-500 to-brand-600 hover:from-brand-600 hover:to-brand-700 rounded-lg text-sm flex items-center gap-2 font-medium shadow-lg shadow-brand-500/20 disabled:opacity-50"
+                      >
+                        {saving ? (
+                          <><RefreshCw className="w-4 h-4 animate-spin" /> Đang lưu...</>
+                        ) : (
+                          <><Save className="w-4 h-4" /> Lưu & Tiếp tục</>
+                        )}
+                      </button>
+                    )}
                   </div>
+
+                  {/* Login reminder */}
+                  {!isLoggedIn && (
+                    <div className="mt-2 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-xs text-yellow-400 text-center">
+                      💡 <Link href="/login" className="underline hover:text-yellow-300">Đăng nhập</Link> để gán nhãn và lưu tiến trình
+                    </div>
+                  )}
                 </div>
               </div>
             ) : (
@@ -861,7 +1259,7 @@ export default function LabelingPage() {
                 <p className="text-sm text-dark-500 text-center max-w-sm">
                   {loading 
                     ? 'Vui lòng chờ trong giây lát'
-                    : 'Chọn một mẫu từ danh sách bên trái hoặc thay đổi bộ lọc.'
+                    : 'Chọn một dataset hoặc thay đổi bộ lọc để xem các segment.'
                   }
                 </p>
               </div>
@@ -870,16 +1268,113 @@ export default function LabelingPage() {
         </div>
       </div>
 
+      {/* Reject Modal */}
+      {showRejectModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-dark-900 border border-dark-700 rounded-xl p-6 w-full max-w-md">
+            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-red-400" />
+              Trả về để sửa
+            </h3>
+            <p className="text-sm text-dark-400 mb-4">
+              Nhập lý do trả về để annotator biết cần sửa gì:
+            </p>
+            <textarea
+              value={reviewComment}
+              onChange={(e) => setReviewComment(e.target.value)}
+              rows={3}
+              className="w-full px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-sm text-white resize-none focus:border-red-500"
+              placeholder="VD: Thời gian chưa chính xác, cần điều chỉnh lại start time..."
+            />
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => { setShowRejectModal(false); setReviewComment(''); }}
+                className="px-4 py-2 bg-dark-800 hover:bg-dark-700 rounded-lg text-sm"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={rejectSegment}
+                disabled={saving || !reviewComment.trim()}
+                className="px-4 py-2 bg-red-500 hover:bg-red-600 rounded-lg text-sm font-medium disabled:opacity-50"
+              >
+                {saving ? 'Đang xử lý...' : 'Xác nhận trả về'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Dataset Modal */}
+      {showDeleteDatasetModal && selectedDataset && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-dark-900 border border-dark-700 rounded-xl p-6 w-full max-w-md">
+            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <Trash2 className="w-5 h-5 text-red-400" />
+              Xóa Dataset
+            </h3>
+            <p className="text-sm text-dark-300 mb-4">
+              Bạn có chắc chắn muốn xóa dataset <span className="font-semibold text-white">
+                {datasets.find(d => d.id === selectedDataset)?.name}
+              </span>?
+            </p>
+            <p className="text-xs text-dark-400 mb-4">
+              Thao tác này sẽ xóa tất cả segments và annotations trong dataset.
+            </p>
+            
+            {/* Delete files checkbox */}
+            <label className="flex items-center gap-2 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={deleteWithFiles}
+                onChange={(e) => setDeleteWithFiles(e.target.checked)}
+                className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-red-500 focus:ring-red-500"
+              />
+              <span className="text-sm text-dark-300">Xóa cả video files trên disk</span>
+            </label>
+            
+            {deleteWithFiles && (
+              <div className="p-2 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-400 mb-4">
+                ⚠️ Các file video trong sentence_clips và signer_clips sẽ bị xóa vĩnh viễn
+              </div>
+            )}
+            
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => { setShowDeleteDatasetModal(false); setDeleteWithFiles(false); }}
+                className="px-4 py-2 bg-dark-800 hover:bg-dark-700 rounded-lg text-sm"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={deleteDataset}
+                disabled={isDeleting}
+                className="px-4 py-2 bg-red-500 hover:bg-red-600 rounded-lg text-sm font-medium disabled:opacity-50 flex items-center gap-2"
+              >
+                {isDeleting ? (
+                  <><RefreshCw className="w-4 h-4 animate-spin" /> Đang xóa...</>
+                ) : (
+                  <><Trash2 className="w-4 h-4" /> Xóa dataset</>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toast */}
       {toast && (
         <div className={`fixed bottom-6 right-6 px-6 py-4 rounded-xl shadow-2xl toast-enter flex items-center gap-3 ${
-          toast.type === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'
+          toast.type === 'success' ? 'bg-green-500 text-white' : 
+          toast.type === 'warning' ? 'bg-yellow-500 text-white' :
+          'bg-red-500 text-white'
         }`}>
-          {toast.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+          {toast.type === 'success' ? <CheckCircle className="w-5 h-5" /> : 
+           toast.type === 'warning' ? <AlertTriangle className="w-5 h-5" /> :
+           <AlertCircle className="w-5 h-5" />}
           {toast.message}
         </div>
       )}
     </div>
   )
 }
-

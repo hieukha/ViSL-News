@@ -433,16 +433,20 @@ class VideoPipeline:
             return []
     
     def step5_create_zip(self) -> Optional[Path]:
-        """Create ZIP archive with clips and metadata"""
+        """Create ZIP archive with clips, signer videos and metadata"""
         self.update_progress(90, "Creating ZIP archive...")
         
         zip_path = self.work_dir / "result.zip"
         
         try:
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Add video clips
+                # Add sentence clips
                 for video_file in self.clips_dir.glob("*.mp4"):
                     zipf.write(video_file, f"sentence_clips/{video_file.name}")
+                
+                # Add signer videos (cropped videos containing signer)
+                for video_file in self.signer_dir.glob("*.mp4"):
+                    zipf.write(video_file, f"signer_clips/{video_file.name}")
                 
                 # Add metadata CSV
                 if self.metadata_file.exists():

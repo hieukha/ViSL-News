@@ -2,7 +2,7 @@
 Collecting module schemas
 """
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 
 class VideoRequest(BaseModel):
@@ -24,3 +24,8 @@ class TaskStatus(BaseModel):
     download_url: Optional[str] = None
     error: Optional[str] = None
 
+
+class UserTasksResponse(BaseModel):
+    """Response containing all tasks for a user"""
+    tasks: List[TaskStatus]
+    active_task: Optional[TaskStatus] = None  # Currently running or pending task
