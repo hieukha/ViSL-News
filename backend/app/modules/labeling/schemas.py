@@ -16,6 +16,7 @@ class SegmentBase(BaseModel):
     end_time: float
     duration: Optional[float] = None
     asr_text: Optional[str] = None
+    signer_id: Optional[int] = None  # ID của người ký (từ face clustering)
     split: str = "train"
     status: str = "raw"
     review_comment: Optional[str] = None  # Admin feedback when needs_fix

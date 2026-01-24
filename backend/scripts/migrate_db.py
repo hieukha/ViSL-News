@@ -22,6 +22,9 @@ def run_migration():
         # Add review_comment to segments
         ("segments", "review_comment", "ALTER TABLE segments ADD COLUMN IF NOT EXISTS review_comment TEXT"),
         
+        # Add signer_id to segments (from face clustering)
+        ("segments", "signer_id", "ALTER TABLE segments ADD COLUMN IF NOT EXISTS signer_id INTEGER"),
+        
         # Add version to annotations
         ("annotations", "version", "ALTER TABLE annotations ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1"),
         

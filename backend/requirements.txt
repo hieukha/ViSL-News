@@ -27,6 +27,13 @@ numpy>=1.24.0
 whisperx @ git+https://github.com/m-bain/whisperx.git
 torch>=2.0.0
 
+# Face Clustering (REQUIRED - for signer identification)
+# Based on: https://github.com/hamidsadeghi68/face-clustering
+# Uses InsightFace for face embedding + DBSCAN for clustering
+insightface>=0.7.3
+onnxruntime>=1.15.0
+scikit-learn>=1.3.0
+
 # Utilities
 tqdm>=4.65.0
 python-slugify>=8.0.0

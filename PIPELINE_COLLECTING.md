@@ -1,7 +1,7 @@
 # PIPELINE CHI TIẾT - CÔNG CỤ THU THẬP DỮ LIỆU ViSL
 
 ## TỔNG QUAN
-Pipeline xử lý video từ YouTube để tạo dataset ngôn ngữ ký hiệu Việt Nam, bao gồm: tải video, phát hiện người ký hiệu, cắt vùng signer, transcribe, và chia thành các clip câu.
+Pipeline xử lý video từ YouTube để tạo dataset ngôn ngữ ký hiệu Việt Nam, bao gồm: tải video, phát hiện người ký hiệu, cắt vùng signer, transcribe, chia thành các clip câu, và **phân cụm signer tự động** (face clustering).
 
 ---
 
@@ -20,9 +20,11 @@ User Input (YouTube URL)
     ↓
 [5] Split into Sentence Clips
     ↓
-[6] Create ZIP Archive
+[6] Face Clustering (BẮT BUỘC) ← MỚI
     ↓
-Output (ZIP file với clips + metadata)
+[7] Create ZIP Archive
+    ↓
+Output (ZIP file với clips + metadata + signer IDs)
 ```
 
 ---
@@ -239,23 +241,60 @@ Output (ZIP file với clips + metadata)
 
 ---
 
-### **BƯỚC 5: TẠO FILE ZIP (90-95%)**
+### **BƯỚC 5: FACE CLUSTERING - PHÂN CỤM SIGNER (80-95%)** ← MỚI
 
-#### 5.1. Create ZIP Archive (90-95%)
+> **BẮT BUỘC**: Bước này tự động xác định signer cho mỗi clip.
+
+#### 5.1. Extract Face Embeddings (80-88%)
+- **Công cụ**: InsightFace / ArcFace (khuyến nghị) hoặc face_recognition
+- **Dựa trên**: https://github.com/hamidsadeghi68/face-clustering
+- **Hành động**:
+  - Trích xuất 5 frames từ mỗi clip
+  - Phát hiện khuôn mặt (InsightFace > MTCNN > face_recognition > OpenCV)
+  - Trích xuất face embeddings (512D với InsightFace, 128D với face_recognition)
+  - Tính embedding trung bình cho mỗi clip
+- **Output**: File `face_embeddings.pkl`
+- **Progress**: 80-88%
+
+#### 5.2. Cluster Embeddings (88-92%)
+- **Công cụ**: scikit-learn DBSCAN
+- **Hành động**:
+  - Normalize embeddings
+  - Chạy DBSCAN clustering (không cần biết trước số signer)
+  - Xử lý noise points (outliers)
+- **Output**: Signer assignments cho mỗi clip
+- **Progress**: 88-92%
+
+#### 5.3. Update Metadata (92-95%)
+- **Hành động**:
+  - Thêm cột `signer_id` vào metadata CSV
+  - Lưu `cluster_results.json` với chi tiết clustering
+- **Output**: 
+  - Metadata CSV với `signer_id` column
+  - `cluster_results.json`
+- **Progress**: 92-95%
+
+---
+
+### **BƯỚC 6: TẠO FILE ZIP (96-99%)**
+
+#### 6.1. Create ZIP Archive (96-99%)
 - **Công cụ**: Python `zipfile`
 - **Hành động**:
   - Tạo file `result.zip` trong work directory
   - Thêm tất cả files từ `sentence_clips/*.mp4` vào `sentence_clips/` trong ZIP
-  - Thêm `sentence_clips_metadata.csv` vào root của ZIP
+  - Thêm `sentence_clips_metadata.csv` (có `signer_id`) vào root của ZIP
+  - Thêm `cluster_results.json` vào root của ZIP
+  - Thêm `face_embeddings.pkl` vào root của ZIP
   - Compression: ZIP_DEFLATED
 - **Output**: `{work_dir}/result.zip`
-- **Progress**: 90-95%
+- **Progress**: 96-99%
 
 ---
 
-### **BƯỚC 6: HOÀN TẤT (95-100%)**
+### **BƯỚC 7: HOÀN TẤT (100%)**
 
-#### 6.1. Update Database (95-100%)
+#### 7.1. Update Database (100%)
 - **Hành động**:
   - Cập nhật task status = "completed"
   - Lưu zip_path vào database
@@ -319,12 +358,18 @@ Khi xử lý playlist hoặc nhiều video:
 │   ├── {base_name}-0.mp4
 │   ├── {base_name}-1.mp4
 │   └── ...
-├── sentence_clips_metadata.csv
+├── sentence_clips_metadata.csv     # Có cột signer_id
+├── face_embeddings.pkl             # Face embeddings (MỚI)
+├── cluster_results.json            # Kết quả clustering (MỚI)
 └── result.zip
     ├── sentence_clips/
     │   ├── {base_name}-0.mp4
     │   └── ...
-    └── sentence_clips_metadata.csv
+    ├── signer_clips/
+    │   └── signer_{slugified-title}.mp4
+    ├── sentence_clips_metadata.csv   # Có cột signer_id
+    ├── face_embeddings.pkl           # Face embeddings
+    └── cluster_results.json          # Kết quả clustering
 ```
 
 ---
@@ -362,10 +407,11 @@ Khi xử lý playlist hoặc nhiều video:
 | 5-15% | Download | Tải video từ YouTube + Signer check |
 | 15-35% | Crop | Cắt vùng signer (per video) |
 | 35-65% | Transcribe | Transcribe audio (per video) |
-| 65-85% | Split | Chia thành clips (per video) |
-| 85-90% | Metadata | Lưu metadata CSV |
-| 90-95% | ZIP | Tạo file ZIP |
-| 95-100% | Complete | Hoàn tất, update database |
+| 65-75% | Split | Chia thành clips (per video) |
+| 75-80% | Metadata | Lưu metadata CSV (pre-clustering) |
+| 80-95% | **Face Clustering** | **Phân cụm signer (BẮT BUỘC)** |
+| 96-99% | ZIP | Tạo file ZIP (có signer IDs) |
+| 100% | Complete | Hoàn tất, update database |
 
 ---
 
@@ -375,6 +421,9 @@ Khi xử lý playlist hoặc nhiều video:
 - **OpenCV**: Face detection, video processing
 - **FFmpeg**: Video cutting, cropping
 - **WhisperX**: Speech-to-text transcription
+- **InsightFace**: Face embedding extraction (recommended)
+- **MTCNN**: Face detection (alternative)
+- **scikit-learn**: Clustering algorithms (DBSCAN)
 - **Python**: zipfile, json, csv, pathlib
 
 ---
@@ -394,6 +443,21 @@ Khi xử lý playlist hoặc nhiều video:
 10. `is_last_segment` - Có phải segment cuối không
 11. `text` - Transcript text
 12. `status` - success/failed
+13. `signer_id` - **ID của signer (0, 1, 2, ...) - TỰ ĐỘNG CLUSTERING**
+
+### Cluster Results JSON Format:
+```json
+{
+  "total_clips": 100,
+  "n_signers": 3,
+  "signer_groups": {
+    "0": ["clip-0", "clip-1", "clip-5"],
+    "1": ["clip-2", "clip-3"],
+    "2": ["clip-4", "clip-6", ...]
+  },
+  "clustering_method": "dbscan"
+}
+```
 
 ---
 

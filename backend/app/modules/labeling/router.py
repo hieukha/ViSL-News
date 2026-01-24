@@ -607,6 +607,14 @@ async def upload_zip(
                         end_time = 0
                         duration = 0
                     
+                    # Parse signer_id from CSV (from face clustering)
+                    signer_id = None
+                    if row.get('signer_id'):
+                        try:
+                            signer_id = int(row.get('signer_id'))
+                        except (ValueError, TypeError):
+                            signer_id = None
+                    
                     # Create segment record
                     segment = Segment(
                         dataset_id=dataset.id,
@@ -618,6 +626,7 @@ async def upload_zip(
                         end_time=end_time,
                         duration=duration,
                         asr_text=row.get('text', ''),
+                        signer_id=signer_id,
                         split=split,
                         status='raw',
                         is_last_segment=row.get('is_last_segment', '').lower() == 'true'

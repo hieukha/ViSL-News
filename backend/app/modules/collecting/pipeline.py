@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Video Processing Pipeline for ViSL Tool
-Downloads YouTube video, crops signer, transcribes, splits into sentence clips
+Downloads YouTube video, crops signer, transcribes, splits into sentence clips,
+and clusters signers using face recognition.
+- Uses InsightFace for face detection (GPU accelerated)
 """
 import os
 import json
@@ -10,8 +12,9 @@ import math
 import subprocess
 import shutil
 import zipfile
+import pickle
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Tuple
 import logging
 
 import yt_dlp
@@ -20,6 +23,13 @@ import numpy as np
 from slugify import slugify
 
 from ...core.config import HF_HOME
+
+# Try to import InsightFace for GPU-accelerated face detection
+try:
+    import insightface
+    INSIGHTFACE_AVAILABLE = True
+except ImportError:
+    INSIGHTFACE_AVAILABLE = False
 
 # Set cache directory
 os.environ['HF_HOME'] = HF_HOME
@@ -38,7 +48,7 @@ SIGNER_ROI = {
     'height': 426
 }
 
-# Face detection for signer check
+# Face detection for signer check (Haar Cascade as fallback)
 FACE_XML = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 FACE_CLF = cv2.CascadeClassifier(FACE_XML)
 
@@ -46,13 +56,116 @@ FACE_CLF = cv2.CascadeClassifier(FACE_XML)
 ROI_CONFIG = {'x': 125, 'y': 637, 'width': 178, 'height': 159}
 TEST_TIMESTAMPS = [2, 10, 20]
 
+# Quality settings
+MIN_VIDEO_SIZE_MB = 5  # Video nhỏ hơn 5MB coi như chất lượng thấp
+FRAME_WIDTH = 1920
+FRAME_HEIGHT = 1080
 
-def has_person(img: np.ndarray, minNeighbors: int = 6, minSize: tuple = (40, 40)) -> bool:
-    """Detect if there's a face in the image"""
+# =========================
+# Face detector (InsightFace with GPU support)
+# =========================
+_insightface_model = None
+
+
+def get_insightface_model():
+    """Get or initialize InsightFace model (singleton pattern)"""
+    global _insightface_model
+    if _insightface_model is None and INSIGHTFACE_AVAILABLE:
+        try:
+            # Try GPU first (CUDA), fallback to CPU
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            _insightface_model = insightface.app.FaceAnalysis(
+                name='buffalo_l',  # High accuracy model
+                providers=providers
+            )
+            _insightface_model.prepare(ctx_id=0, det_size=(640, 640))
+            logger.info("✓ InsightFace model loaded (GPU accelerated)")
+        except Exception as e:
+            logger.warning(f"Failed to load InsightFace model: {e}")
+            _insightface_model = False  # Mark as failed
+    return _insightface_model if _insightface_model is not False else None
+
+
+def detect_face_insightface(img: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Detect face using InsightFace (GPU accelerated).
+    
+    Args:
+        img: Input image (BGR format)
+        
+    Returns:
+        (x, y, w, h) bounding box of the largest face, or None if no face detected
+    """
+    model = get_insightface_model()
+    if model is None:
+        return None
+    
+    try:
+        # InsightFace expects BGR format (same as OpenCV)
+        faces = model.get(img)
+        
+        if len(faces) > 0:
+            # Return the largest face
+            largest_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+            bbox = largest_face.bbox.astype(int)
+            x, y, x2, y2 = bbox
+            w, h = x2 - x, y2 - y
+            return (x, y, w, h)
+    except Exception as e:
+        logger.debug(f"InsightFace detection error: {e}")
+    
+    return None
+
+
+def detect_face_haar(img: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Fallback face detection using OpenCV Haar Cascade.
+    
+    Args:
+        img: Input image (BGR format)
+        
+    Returns:
+        (x, y, w, h) bounding box of the largest face, or None if no face detected
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
-    faces = FACE_CLF.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=minNeighbors, minSize=minSize)
-    return len(faces) > 0
+    
+    faces = FACE_CLF.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=6,
+        minSize=(40, 40),
+    )
+    
+    if len(faces) > 0:
+        # Return the largest face
+        largest_face = max(faces, key=lambda f: f[2] * f[3])
+        x, y, w, h = largest_face
+        return (x, y, w, h)
+    
+    return None
+
+
+def has_person(img: np.ndarray) -> bool:
+    """
+    Check if a person (face) is present in the image.
+    Uses InsightFace (GPU) if available, falls back to Haar Cascade.
+    
+    Args:
+        img: Input image (BGR format)
+        
+    Returns:
+        True if a face is detected, False otherwise
+    """
+    # Try InsightFace first (better accuracy, GPU accelerated)
+    if INSIGHTFACE_AVAILABLE:
+        face_box = detect_face_insightface(img)
+        if face_box is not None:
+            return True
+    
+    # Fallback to Haar Cascade if InsightFace fails or not available
+    face_box = detect_face_haar(img)
+    return face_box is not None
 
 
 def extract_frame_at_timestamp(video_path: str, timestamp: float) -> Optional[np.ndarray]:
@@ -127,6 +240,36 @@ def get_video_duration(video_path: Path) -> Optional[float]:
         return None
 
 
+def standardize_video_to_mp4(raw_path: Path, final_path: Path) -> bool:
+    """
+    Convert any DASH/webm/mkv/mp4 input into a stable OpenCV-friendly MP4.
+    This is needed because YouTube now uses SABR streaming.
+    """
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(raw_path),
+        "-movflags", "+faststart",
+        "-vsync", "cfr",
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        str(final_path),
+    ]
+
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return final_path.exists() and final_path.stat().st_size > 0
+    except Exception as e:
+        logger.error(f"ffmpeg standardize failed for {raw_path.name}: {e}")
+        return False
+
+
 class VideoPipeline:
     """End-to-end video processing pipeline"""
     
@@ -152,16 +295,32 @@ class VideoPipeline:
             self.progress_callback(percent, message)
     
     def step1_download_video(self, youtube_url: str, max_videos: int = 1) -> List[Path]:
-        """Download video(s) from YouTube (supports single video or playlist)"""
+        """Download video(s) from YouTube (supports single video or playlist)
+        
+        Uses SABR/DASH compatible format and ffmpeg standardization
+        to handle YouTube's new streaming protocol.
+        """
         self.update_progress(5, f"Downloading video(s) from YouTube (max: {max_videos})...")
         
-        # Use temp filename for downloading - will rename after signer check
+        # Use format compatible with YouTube's SABR/DASH streaming
+        # Better options with rate limiting and retries (matching data_collection.py)
         ydl_opts = {
-            'outtmpl': str(self.raw_dir / '%(id)s_temp.%(ext)s'),
-            'format': 'best[ext=mp4]/best',
+            'outtmpl': str(self.raw_dir / '%(id)s_raw.%(ext)s'),
+            # Ưu tiên chất lượng cao: 1080p > 720p > best available
+            'format': 'bestvideo[height>=1080]+bestaudio/bestvideo[height>=720]+bestaudio/bv*+ba/b',
+            'merge_output_format': 'mkv',      # Stable container for merging
             'quiet': True,
             'no_warnings': True,
             'ignoreerrors': True,
+            'noplaylist': False,
+            # === Fix HTTP 403 Forbidden & rate limiting ===
+            'check_formats': 'selected',       # Kiểm tra format trước khi tải
+            'source_address': '0.0.0.0',       # Force IPv4
+            'sleep_interval': 3,               # Đợi 3s giữa các video
+            'max_sleep_interval': 6,           # Tối đa 6s
+            'extractor_retries': 5,            # Retry 5 lần nếu fail
+            'retries': 5,                      # Retry download 5 lần
+            'fragment_retries': 10,            # Retry fragment 10 lần (cho HLS/m3u8)
         }
         
         if max_videos and max_videos > 0:
@@ -197,54 +356,71 @@ class VideoPipeline:
                     try:
                         ydl.download([video_url])
                         
-                        # Find the temporary file
-                        temp_file = self.raw_dir / f"{video_id}_temp.mp4"
-                        if not temp_file.exists():
-                            temp_file = self.raw_dir / f"{video_id}_temp.webm"
+                        # Find raw file (could be mkv, webm, mp4, etc.)
+                        raw_candidates = [
+                            p for p in self.raw_dir.glob(f"{video_id}_raw.*")
+                            if not p.name.endswith(".part")
+                        ]
                         
-                        if temp_file.exists():
-                            # Check for signer - must pass ALL 3 test frames
-                            self.update_progress(12 + idx, f"Checking for signer in video {idx+1}...")
-                            has_signer = check_video_has_signer(str(temp_file))
-                            
-                            if not has_signer:
-                                logger.info(f"✗ No signer detected in {temp_file.name} - skipping video")
-                                # Delete the temporary file since it doesn't have a signer
-                                try:
-                                    os.remove(temp_file)
-                                    logger.info(f"  Deleted: {temp_file.name}")
-                                except Exception as del_e:
-                                    logger.warning(f"  Could not delete {temp_file.name}: {del_e}")
-                                continue  # Skip to next video
-                            
-                            logger.info(f"✓ Signer detected - saving video")
-                            
-                            # Create slugified filename (like data_collection.py)
-                            slug_title = slugify(original_title)
-                            new_filename = f"{slug_title}.mp4"
+                        if not raw_candidates:
+                            logger.warning(f"No raw file found for {video_id}")
+                            continue
+                        
+                        raw_file = max(raw_candidates, key=lambda p: p.stat().st_size)
+                        final_mp4 = self.raw_dir / f"{video_id}_final.mp4"
+                        
+                        # Standardize to OpenCV-friendly MP4 using ffmpeg
+                        self.update_progress(11 + idx, f"Converting video {idx+1} to MP4...")
+                        if not standardize_video_to_mp4(raw_file, final_mp4):
+                            logger.warning(f"Failed to standardize {raw_file.name}")
+                            raw_file.unlink(missing_ok=True)
+                            continue
+                        
+                        # Remove raw file after successful conversion
+                        raw_file.unlink(missing_ok=True)
+                        
+                        # Check video quality (size check)
+                        converted_size_mb = final_mp4.stat().st_size / (1024 * 1024)
+                        if converted_size_mb < MIN_VIDEO_SIZE_MB:
+                            logger.warning(f"Video too small ({converted_size_mb:.1f}MB < {MIN_VIDEO_SIZE_MB}MB), skipping: {original_title}")
+                            final_mp4.unlink(missing_ok=True)
+                            continue
+                        
+                        # Check for signer - must pass ALL 3 test frames
+                        self.update_progress(12 + idx, f"Checking for signer in video {idx+1}...")
+                        has_signer = check_video_has_signer(str(final_mp4))
+                        
+                        if not has_signer:
+                            logger.info(f"✗ No signer detected in {final_mp4.name} - skipping video")
+                            final_mp4.unlink(missing_ok=True)
+                            continue
+                        
+                        logger.info(f"✓ Signer detected - saving video")
+                        
+                        # Create slugified filename
+                        slug_title = slugify(original_title)
+                        new_filename = f"{slug_title}.mp4"
+                        new_path = self.raw_dir / new_filename
+                        
+                        # Handle duplicate filenames
+                        counter = 1
+                        while new_path.exists():
+                            new_filename = f"{slug_title}-{counter}.mp4"
                             new_path = self.raw_dir / new_filename
-                            
-                            # Handle duplicate filenames
-                            counter = 1
-                            while new_path.exists():
-                                new_filename = f"{slug_title}-{counter}.mp4"
-                                new_path = self.raw_dir / new_filename
-                                counter += 1
-                            
-                            # Rename the file from temp to slugified name
-                            os.rename(temp_file, new_path)
-                            logger.info(f"  Saved as: {new_filename}")
-                            
-                            downloaded_files.append(new_path)
+                            counter += 1
+                        
+                        # Rename the final file to slugified name
+                        final_mp4.rename(new_path)
+                        logger.info(f"  Saved as: {new_filename}")
+                        
+                        downloaded_files.append(new_path)
+                        
                     except Exception as e:
                         logger.error(f"Error downloading {video_id}: {e}")
-                        # Clean up temp file if it exists
-                        temp_file = self.raw_dir / f"{video_id}_temp.mp4"
-                        if temp_file.exists():
-                            try:
-                                os.remove(temp_file)
-                            except:
-                                pass
+                        # Clean up any temp/raw files
+                        for pattern in [f"{video_id}_raw.*", f"{video_id}_final.mp4"]:
+                            for f in self.raw_dir.glob(pattern):
+                                f.unlink(missing_ok=True)
                         continue
                 
                 self.update_progress(15, f"Downloaded {len(downloaded_files)} video(s)")
@@ -432,9 +608,98 @@ class VideoPipeline:
             logger.error(f"Error splitting clips: {e}")
             return []
     
-    def step5_create_zip(self) -> Optional[Path]:
-        """Create ZIP archive with clips, signer videos and metadata"""
-        self.update_progress(90, "Creating ZIP archive...")
+    def step5_face_clustering(self) -> bool:
+        """
+        Cluster signers using face recognition - REQUIRED STEP.
+        Identifies and assigns signer IDs to each clip.
+        """
+        self.update_progress(80, "Starting face clustering (required step)...")
+        
+        try:
+            # Import face clustering functions from local module
+            from .face_clustering import (
+                extract_all_embeddings,
+                cluster_embeddings,
+                update_metadata_with_signers,
+                INSIGHTFACE_AVAILABLE
+            )
+            
+            # Check InsightFace availability
+            if INSIGHTFACE_AVAILABLE:
+                logger.info("Face clustering: Using InsightFace + DBSCAN")
+            else:
+                logger.error("Face clustering: InsightFace not available!")
+                raise Exception("InsightFace is required for face clustering")
+            
+            # Extract embeddings from all clips
+            self.update_progress(82, "Extracting face embeddings from clips...")
+            embeddings_file = self.work_dir / "face_embeddings.pkl"
+            
+            embeddings_dict = extract_all_embeddings(
+                clips_dir=self.clips_dir,
+                metadata_file=self.metadata_file,
+                embeddings_file=embeddings_file,
+                max_clips=None
+            )
+            
+            if not embeddings_dict:
+                logger.error("Face clustering failed: No embeddings extracted from clips")
+                raise Exception("Face clustering failed: Could not extract face embeddings from any clips")
+            
+            logger.info(f"Extracted embeddings from {len(embeddings_dict)} clips")
+            
+            # Cluster embeddings using DBSCAN
+            self.update_progress(88, f"Clustering {len(embeddings_dict)} face embeddings...")
+            signer_assignments = cluster_embeddings(embeddings_dict)
+            
+            if not signer_assignments:
+                logger.error("Face clustering failed: Clustering returned no results")
+                raise Exception("Face clustering failed: No signers identified")
+            
+            n_signers = len(set(signer_assignments.values()))
+            logger.info(f"Identified {n_signers} unique signer(s)")
+            
+            # Update metadata with signer IDs
+            self.update_progress(92, "Updating metadata with signer IDs...")
+            update_metadata_with_signers(
+                metadata_file=self.metadata_file,
+                output_file=self.metadata_file,  # Overwrite with signer_id column
+                signer_assignments=signer_assignments
+            )
+            
+            # Save cluster results JSON
+            cluster_results_file = self.work_dir / "cluster_results.json"
+            signer_groups = {}
+            for clip_name, signer_id in signer_assignments.items():
+                if signer_id not in signer_groups:
+                    signer_groups[signer_id] = []
+                signer_groups[signer_id].append(clip_name)
+            
+            cluster_results = {
+                'total_clips': len(signer_assignments),
+                'n_signers': n_signers,
+                'signer_groups': {str(k): v for k, v in signer_groups.items()},
+                'clustering_method': 'dbscan'
+            }
+            
+            with open(cluster_results_file, 'w', encoding='utf-8') as f:
+                json.dump(cluster_results, f, ensure_ascii=False, indent=2)
+            
+            self.update_progress(95, f"Face clustering complete: {n_signers} signer(s) identified in {len(signer_assignments)} clips")
+            return True
+            
+        except ImportError as e:
+            logger.error(f"Face clustering import error: {e}")
+            logger.error("Make sure dependencies are installed: pip install insightface onnxruntime scikit-learn")
+            raise Exception(f"Face clustering failed (import error): {e}")
+        except Exception as e:
+            logger.error(f"Face clustering error: {e}")
+            # Don't fail silently - this is a required step
+            raise Exception(f"Face clustering failed (required step): {e}")
+    
+    def step6_create_zip(self) -> Optional[Path]:
+        """Create ZIP archive with clips, signer videos, metadata and clustering results"""
+        self.update_progress(96, "Creating ZIP archive...")
         
         zip_path = self.work_dir / "result.zip"
         
@@ -448,11 +713,21 @@ class VideoPipeline:
                 for video_file in self.signer_dir.glob("*.mp4"):
                     zipf.write(video_file, f"signer_clips/{video_file.name}")
                 
-                # Add metadata CSV
+                # Add metadata CSV (now includes signer_id column)
                 if self.metadata_file.exists():
                     zipf.write(self.metadata_file, "sentence_clips_metadata.csv")
             
-            self.update_progress(95, f"ZIP created: {zip_path.name}")
+                # Add face clustering results
+                cluster_results_file = self.work_dir / "cluster_results.json"
+                if cluster_results_file.exists():
+                    zipf.write(cluster_results_file, "cluster_results.json")
+                
+                # Add face embeddings (for future analysis)
+                embeddings_file = self.work_dir / "face_embeddings.pkl"
+                if embeddings_file.exists():
+                    zipf.write(embeddings_file, "face_embeddings.pkl")
+            
+            self.update_progress(99, f"ZIP created: {zip_path.name}")
             return zip_path
             
         except Exception as e:
@@ -460,7 +735,17 @@ class VideoPipeline:
             return None
     
     def run(self, youtube_url: str, max_videos: int = 1) -> Optional[Path]:
-        """Run the complete pipeline for one or more videos"""
+        """
+        Run the complete pipeline for one or more videos.
+        
+        Pipeline steps:
+        1. Download video(s) from YouTube
+        2. Crop signer region
+        3. Transcribe audio (WhisperX)
+        4. Split into sentence clips
+        5. Face clustering (REQUIRED) - identify signers
+        6. Create ZIP archive
+        """
         self.update_progress(0, "Starting pipeline...")
         
         # Step 1: Download video(s)
@@ -472,10 +757,10 @@ class VideoPipeline:
         total_videos = len(video_paths)
         all_metadata = []
         
-        # Process each video
+        # Process each video (steps 2-4)
         for idx, video_path in enumerate(video_paths):
             video_num = idx + 1
-            base_progress = 15 + int((idx / total_videos) * 70)  # 15-85%
+            base_progress = 15 + int((idx / total_videos) * 55)  # 15-70% (reduced to make room for clustering)
             
             self.update_progress(base_progress, f"Processing video {video_num}/{total_videos}: {video_path.name}")
             
@@ -501,22 +786,34 @@ class VideoPipeline:
             else:
                 logger.warning(f"No clips generated for {video_path.name}")
         
-        # Save combined metadata
-        if all_metadata:
-            self.update_progress(88, "Saving combined metadata...")
-            fieldnames = ['name', 'video_source', 'segment_id', 'start_original', 'start_rounded',
-                         'end_original', 'end_rounded', 'end_with_buffer', 'duration',
-                         'is_last_segment', 'text', 'status']
-            
-            with open(self.metadata_file, 'w', encoding='utf-8', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(all_metadata)
+        # Check if we have any clips to process
+        if not all_metadata:
+            logger.error("No clips generated from any video")
+            return None
         
-        # Step 5: Create ZIP
-        zip_path = self.step5_create_zip()
+        # Save combined metadata (before clustering)
+        self.update_progress(75, "Saving combined metadata...")
+        fieldnames = ['name', 'video_source', 'segment_id', 'start_original', 'start_rounded',
+                     'end_original', 'end_rounded', 'end_with_buffer', 'duration',
+                     'is_last_segment', 'text', 'status']
         
-        self.update_progress(100, f"Pipeline complete! Processed {total_videos} video(s), {len(all_metadata)} clips")
+        with open(self.metadata_file, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_metadata)
+        
+        # Step 5: Face Clustering (REQUIRED)
+        try:
+            self.step5_face_clustering()
+        except Exception as e:
+            logger.error(f"Pipeline failed at face clustering: {e}")
+            self.update_progress(100, f"Pipeline failed: Face clustering error - {e}")
+            return None  # Fail the entire pipeline if clustering fails
+        
+        # Step 6: Create ZIP
+        zip_path = self.step6_create_zip()
+        
+        self.update_progress(100, f"Pipeline complete! Processed {total_videos} video(s), {len(all_metadata)} clips with signer IDs")
         return zip_path
     
     def cleanup(self):

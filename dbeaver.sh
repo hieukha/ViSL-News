@@ -20,9 +20,8 @@ case "$1" in
     
     echo "✅ DBeaver is running on http://localhost:5431"
     echo ""
-    echo "📝 Default credentials:"
-    echo "   Username: admin"
-    echo "   Password: admin"
+    echo "   Username: cbadmin"
+    echo "   Password: Kha26122004"
     echo ""
     echo "🔗 To connect to PostgreSQL:"
     echo "   Host: visl_db"

@@ -58,6 +58,7 @@ class Segment(Base):
     end_time = Column(Numeric, nullable=False)
     duration = Column(Numeric)
     asr_text = Column(Text)  # transcript tự động từ ASR
+    signer_id = Column(Integer)  # ID của người ký (từ face clustering)
     split = Column(String(20), default="train")  # 'train' | 'val' | 'test'
     status = Column(String(50), default="raw")  # 'raw' | 'expert_labeled' | 'needs_fix' | 'reviewed'
     review_comment = Column(Text)  # Admin comment when needs_fix
