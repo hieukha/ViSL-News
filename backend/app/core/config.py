@@ -5,8 +5,8 @@ import os
 from pathlib import Path
 
 # Base directories
-BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-DATA_DIR = BASE_DIR.parent / "data"
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent  # = ViSL_tool/
+DATA_DIR = BASE_DIR / "data"  # = ViSL_tool/data/ (dữ liệu nằm trong tool)
 TASKS_DIR = BASE_DIR / "tasks"
 
 # Ensure directories exist
@@ -28,7 +28,7 @@ VIDEO_DIR = os.getenv("VIDEO_DIR", str(DATA_DIR / "sentence_clips"))
 SIGNER_CLIPS_DIR = os.getenv("SIGNER_CLIPS_DIR", str(DATA_DIR / "signer_clips"))
 
 # Hugging Face cache
-HF_HOME = os.getenv("HF_HOME", str(BASE_DIR.parent / "cache"))
+HF_HOME = os.getenv("HF_HOME", str(BASE_DIR / "cache"))  # = ViSL_tool/cache/
 os.environ['HF_HOME'] = HF_HOME
 
 # CORS

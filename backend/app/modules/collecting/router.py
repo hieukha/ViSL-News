@@ -20,7 +20,7 @@ from ...core.security import get_current_user, get_current_user_optional
 from ...models.user import User
 from ...models.collecting import CollectingTask
 from .schemas import VideoRequest, TaskResponse, TaskStatus, UserTasksResponse
-from .pipeline import VideoPipeline
+from .pipeline import VideoPipeline  # Now imports from pipeline/__init__.py
 
 logger = logging.getLogger(__name__)
 

@@ -34,8 +34,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ../data:/data:ro
-      - ../cache:/cache
+      - ./data:/data:ro
+      - ./cache:/cache
       - ./backend/tasks:/app/tasks
     depends_on:
       db:
@@ -48,7 +48,7 @@ services:
       dockerfile: Dockerfile
     container_name: visl_frontend
     ports:
-      - "3000:3000"
+      - "3001:3001"
     environment:
       - NODE_ENV=production
     depends_on:

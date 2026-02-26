@@ -52,6 +52,6 @@ Thumbs.db
 logs/
 *.log
 
-
-
-
+# Data
+data/
+cache/

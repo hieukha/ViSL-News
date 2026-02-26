@@ -1,14 +1,14 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
-import { 
-  Play, 
-  Pause, 
-  SkipBack, 
-  SkipForward, 
-  Save, 
-  CheckCircle, 
+import {
+  Play,
+  Pause,
+  SkipBack,
+  SkipForward,
+  Save,
+  CheckCircle,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -27,7 +27,9 @@ import {
   MessageSquare,
   AlertTriangle,
   Shield,
-  Trash2
+  Trash2,
+  Download,
+  Loader2
 } from 'lucide-react'
 
 interface Dataset {
@@ -90,11 +92,11 @@ export default function LabelingPage() {
   const [userRole, setUserRole] = useState<string>('annotator')
   const [userName, setUserName] = useState<string>('')
   const [isLoggedIn, setIsLoggedIn] = useState(false)
-  
+
   // Dataset State
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [selectedDataset, setSelectedDataset] = useState<number | null>(null)
-  
+
   // Segments State
   const [segments, setSegments] = useState<Segment[]>([])
   const [currentSegment, setCurrentSegment] = useState<Segment | null>(null)
@@ -103,35 +105,39 @@ export default function LabelingPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null)
-  
+
   // Video player state
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [videoDuration, setVideoDuration] = useState(0)
   const [isMuted, setIsMuted] = useState(false)
-  const [videoRef, setVideoRef] = useState<HTMLVideoElement | null>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
   const [playbackRate, setPlaybackRate] = useState(1)
-  
+  const pendingSeekRef = useRef<number | null>(null)
+
   // Form state
   const [finalText, setFinalText] = useState('')
   const [glossSequence, setGlossSequence] = useState('')
   const [startTime, setStartTime] = useState(0)
   const [endTime, setEndTime] = useState(0)
   const [comment, setComment] = useState('')
-  
+
   // Admin review state
   const [reviewComment, setReviewComment] = useState('')
   const [showRejectModal, setShowRejectModal] = useState(false)
-  
+
   // Delete dataset state
   const [showDeleteDatasetModal, setShowDeleteDatasetModal] = useState(false)
   const [deleteWithFiles, setDeleteWithFiles] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
-  
+
+  // Export dataset state
+  const [isExporting, setIsExporting] = useState(false)
+
   // Annotation history
   const [annotationHistory, setAnnotationHistory] = useState<Annotation[]>([])
   const [showHistory, setShowHistory] = useState(false)
-  
+
   // Filter state
   const [statusFilter, setStatusFilter] = useState<string>('raw')
   const [splitFilter, setSplitFilter] = useState<string>('')
@@ -191,19 +197,19 @@ export default function LabelingPage() {
       if (statusFilter) params.append('status', statusFilter)
       if (splitFilter) params.append('split', splitFilter)
       if (selectedDataset) params.append('dataset_id', selectedDataset.toString())
-      
+
       const res = await fetch(`${API_BASE}/segments?${params}`)
-      
+
       if (!res.ok) {
         throw new Error('Backend không phản hồi')
       }
-      
+
       const data = await res.json()
-      
+
       const segmentList = data.segments || []
       setSegments(segmentList)
       setTotalPages(Math.ceil((data.total || 0) / (data.per_page || 20)))
-      
+
       if (segmentList.length > 0 && !currentSegment) {
         selectSegment(segmentList[0], 0)
       }
@@ -242,13 +248,13 @@ export default function LabelingPage() {
   const selectSegment = (segment: Segment, index: number) => {
     // Determine the target start time for this segment
     const targetStartTime = segment.latest_annotation?.start_time || segment.start_time
-    
+
     // Check if video source changed (need to wait for video load)
     const videoSourceChanged = !currentSegment || currentSegment.video_source !== segment.video_source
-    
+
     setCurrentSegment(segment)
     setCurrentIndex(index)
-    
+
     if (segment.latest_annotation) {
       const ann = segment.latest_annotation
       setFinalText(ann.final_text || segment.asr_text || '')
@@ -263,30 +269,23 @@ export default function LabelingPage() {
       setEndTime(segment.end_time)
       setComment('')
     }
-    
+
     // Reset review comment
     setReviewComment('')
     setIsPlaying(false)
     setCurrentTime(targetStartTime)
-    
+
     // Seek video to target start time
     if (videoSourceChanged) {
-      // Video source changed - the seek will happen in handleLoadedMetadata via pendingSeekTime
-      // Store the target time in a data attribute on the video element as a workaround
-      if (videoRef) {
-        videoRef.dataset.pendingSeek = targetStartTime.toString()
-      }
+      // Video source changed - store pending seek time, will be applied in handleLoadedMetadata
+      pendingSeekRef.current = targetStartTime
     } else {
       // Same video source - seek immediately (video is already loaded)
-      if (videoRef && videoRef.readyState >= 1) {
-        videoRef.currentTime = targetStartTime
+      if (videoRef.current && videoRef.current.readyState >= 1) {
+        videoRef.current.currentTime = targetStartTime
       } else {
-        // Video not ready yet, try after a short delay
-        setTimeout(() => {
-          if (videoRef) {
-            videoRef.currentTime = targetStartTime
-          }
-        }, 50)
+        // Video not ready yet, store as pending
+        pendingSeekRef.current = targetStartTime
       }
     }
   }
@@ -311,13 +310,13 @@ export default function LabelingPage() {
 
   const resetToOriginal = () => {
     if (!currentSegment) return
-    
+
     setFinalText(currentSegment.asr_text || '')
     setGlossSequence('')
     setStartTime(currentSegment.start_time)
     setEndTime(currentSegment.end_time)
     setComment('')
-    
+
     seekTo(currentSegment.start_time)
     showToast('Đã reset về giá trị ban đầu', 'success')
   }
@@ -325,24 +324,24 @@ export default function LabelingPage() {
   // Annotator: Save annotation
   const saveAnnotation = async () => {
     if (!currentSegment) return
-    
+
     if (!isLoggedIn) {
       showToast('Vui lòng đăng nhập để gán nhãn', 'error')
       return
     }
-    
+
     if (userRole === 'admin') {
       showToast('Admin không có quyền gán nhãn, chỉ có quyền duyệt', 'warning')
       return
     }
-    
+
     setSaving(true)
-    
+
     try {
       const token = localStorage.getItem('access_token')
       const res = await fetch(`${API_BASE}/annotations`, {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
@@ -355,10 +354,10 @@ export default function LabelingPage() {
           comment: comment
         })
       })
-      
+
       if (res.ok) {
         showToast('Đã lưu thành công!', 'success')
-        
+
         // Update local segment status
         const updatedSegments = [...segments]
         updatedSegments[currentIndex] = {
@@ -368,10 +367,10 @@ export default function LabelingPage() {
         }
         setSegments(updatedSegments)
         setCurrentSegment({ ...currentSegment, status: 'expert_labeled', review_comment: undefined })
-        
+
         fetchStats()
         fetchAnnotationHistory(currentSegment.id)
-        
+
         // Go to next after 1 second
         setTimeout(() => goToNext(), 1000)
       } else {
@@ -387,26 +386,26 @@ export default function LabelingPage() {
   // Admin: Approve segment
   const approveSegment = async () => {
     if (!currentSegment) return
-    
+
     if (userRole !== 'admin') {
       showToast('Chỉ Admin mới có quyền duyệt', 'error')
       return
     }
-    
+
     setSaving(true)
-    
+
     try {
       const token = localStorage.getItem('access_token')
       const res = await fetch(`${API_BASE}/segments/${currentSegment.id}/review/approve`, {
         method: 'POST',
-        headers: { 
+        headers: {
           'Authorization': `Bearer ${token}`
         }
       })
-      
+
       if (res.ok) {
         showToast('Đã duyệt segment!', 'success')
-        
+
         // Update local segment status
         const updatedSegments = [...segments]
         updatedSegments[currentIndex] = {
@@ -416,9 +415,9 @@ export default function LabelingPage() {
         }
         setSegments(updatedSegments)
         setCurrentSegment({ ...currentSegment, status: 'reviewed', review_comment: undefined })
-        
+
         fetchStats()
-        
+
         // Go to next after 1 second
         setTimeout(() => goToNext(), 1000)
       } else {
@@ -434,19 +433,19 @@ export default function LabelingPage() {
   // Admin: Reject segment
   const rejectSegment = async () => {
     if (!currentSegment) return
-    
+
     if (userRole !== 'admin') {
       showToast('Chỉ Admin mới có quyền trả về', 'error')
       return
     }
-    
+
     setSaving(true)
-    
+
     try {
       const token = localStorage.getItem('access_token')
       const res = await fetch(`${API_BASE}/segments/${currentSegment.id}/review/reject`, {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
@@ -454,11 +453,11 @@ export default function LabelingPage() {
           comment: reviewComment
         })
       })
-      
+
       if (res.ok) {
         showToast('Đã trả về để sửa!', 'warning')
         setShowRejectModal(false)
-        
+
         // Update local segment status
         const updatedSegments = [...segments]
         updatedSegments[currentIndex] = {
@@ -468,9 +467,9 @@ export default function LabelingPage() {
         }
         setSegments(updatedSegments)
         setCurrentSegment({ ...currentSegment, status: 'needs_fix', review_comment: reviewComment })
-        
+
         fetchStats()
-        
+
         // Go to next after 1 second
         setTimeout(() => goToNext(), 1000)
       } else {
@@ -487,23 +486,23 @@ export default function LabelingPage() {
   // Admin: Delete dataset
   const deleteDataset = async () => {
     if (!selectedDataset) return
-    
+
     if (userRole !== 'admin') {
       showToast('Chỉ Admin mới có quyền xóa dataset', 'error')
       return
     }
-    
+
     setIsDeleting(true)
-    
+
     try {
       const token = localStorage.getItem('access_token')
       const res = await fetch(`${API_BASE}/datasets/${selectedDataset}?delete_files=${deleteWithFiles}`, {
         method: 'DELETE',
-        headers: { 
+        headers: {
           'Authorization': `Bearer ${token}`
         }
       })
-      
+
       if (res.ok) {
         const data = await res.json()
         const resetMsg = data.sequence_reset ? ' (ID đã reset về 1)' : ''
@@ -525,56 +524,111 @@ export default function LabelingPage() {
     setDeleteWithFiles(false)
   }
 
+  // Admin: Export dataset
+  const exportDataset = async (reviewedOnly: boolean = false) => {
+    if (!selectedDataset) {
+      showToast('Vui lòng chọn dataset để export', 'warning')
+      return
+    }
+
+    if (userRole !== 'admin') {
+      showToast('Chỉ Admin mới có quyền export dataset', 'error')
+      return
+    }
+
+    setIsExporting(true)
+
+    try {
+      const token = localStorage.getItem('access_token')
+      const params = new URLSearchParams()
+      if (reviewedOnly) params.append('include_reviewed_only', 'true')
+
+      const res = await fetch(`${API_BASE}/datasets/${selectedDataset}/export?${params}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+
+      if (res.ok) {
+        // Get filename from Content-Disposition header
+        const contentDisposition = res.headers.get('Content-Disposition')
+        let filename = 'dataset_export.zip'
+        if (contentDisposition) {
+          const match = contentDisposition.match(/filename="?(.+)"?/)
+          if (match) filename = match[1]
+        }
+
+        // Download the file
+        const blob = await res.blob()
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = filename
+        document.body.appendChild(a)
+        a.click()
+        window.URL.revokeObjectURL(url)
+        document.body.removeChild(a)
+
+        showToast('Export thành công!', 'success')
+      } else {
+        const error = await res.json()
+        showToast(error.detail || 'Lỗi khi export dataset', 'error')
+      }
+    } catch (error) {
+      showToast('Lỗi kết nối server', 'error')
+    }
+    setIsExporting(false)
+  }
+
   // Video controls
   const togglePlay = () => {
-    if (videoRef) {
+    if (videoRef.current) {
       if (isPlaying) {
-        videoRef.pause()
+        videoRef.current.pause()
       } else {
-        videoRef.play()
+        videoRef.current.play()
       }
       setIsPlaying(!isPlaying)
     }
   }
 
   const handleTimeUpdate = () => {
-    if (videoRef) {
-      setCurrentTime(videoRef.currentTime)
+    if (videoRef.current) {
+      setCurrentTime(videoRef.current.currentTime)
     }
   }
 
   const handleLoadedMetadata = () => {
-    if (videoRef) {
-      setVideoDuration(videoRef.duration)
-      videoRef.playbackRate = playbackRate
-      
-      // Check for pending seek time (set when video source changed)
-      const pendingSeek = videoRef.dataset.pendingSeek
-      if (pendingSeek) {
-        const seekTime = parseFloat(pendingSeek)
-        videoRef.currentTime = seekTime
+    if (videoRef.current) {
+      setVideoDuration(videoRef.current.duration)
+      videoRef.current.playbackRate = playbackRate
+
+      // Check for pending seek time (set when video source changed or segment selected)
+      if (pendingSeekRef.current !== null) {
+        const seekTime = pendingSeekRef.current
+        videoRef.current.currentTime = seekTime
         setCurrentTime(seekTime)
-        delete videoRef.dataset.pendingSeek // Clear the pending seek
+        pendingSeekRef.current = null // Clear the pending seek
       } else if (currentSegment) {
         // Fallback: seek to segment's start time
         const targetTime = startTime || currentSegment.start_time
-        videoRef.currentTime = targetTime
+        videoRef.current.currentTime = targetTime
         setCurrentTime(targetTime)
       }
     }
   }
 
   const seekTo = (time: number) => {
-    if (videoRef) {
-      videoRef.currentTime = time
+    if (videoRef.current) {
+      videoRef.current.currentTime = time
       setCurrentTime(time)
     }
   }
 
   const changePlaybackRate = (rate: number) => {
     setPlaybackRate(rate)
-    if (videoRef) {
-      videoRef.playbackRate = rate
+    if (videoRef.current) {
+      videoRef.current.playbackRate = rate
     }
   }
 
@@ -653,20 +707,19 @@ export default function LabelingPage() {
                 </div>
               </div>
             </div>
-            
+
             {/* User info & Stats */}
             <div className="flex items-center gap-4">
               {/* User Role Badge */}
               {isLoggedIn && (
-                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs ${
-                  isAdmin ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'
-                }`}>
+                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs ${isAdmin ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'
+                  }`}>
                   {isAdmin ? <Shield className="w-3 h-3" /> : <User className="w-3 h-3" />}
                   <span>{isAdmin ? 'Admin' : 'Annotator'}</span>
                   {userName && <span className="text-dark-400">• {userName}</span>}
                 </div>
               )}
-              
+
               {/* Quick Stats */}
               {stats && (
                 <div className="flex items-center gap-4 text-xs">
@@ -703,7 +756,7 @@ export default function LabelingPage() {
 
       <div className="max-w-[1920px] mx-auto px-4 py-3">
         <div className="grid grid-cols-12 gap-4">
-          
+
           {/* Sidebar - Segment List */}
           <aside className="col-span-3 flex flex-col h-[calc(100vh-140px)]">
             {/* Dataset Selector */}
@@ -713,20 +766,34 @@ export default function LabelingPage() {
                   <Database className="w-4 h-4 text-dark-400" />
                   <span className="text-xs font-medium text-dark-400">Dataset</span>
                 </div>
-                {/* Admin: Delete dataset button */}
+                {/* Admin: Export & Delete dataset buttons */}
                 {isAdmin && selectedDataset && (
-                  <button
-                    onClick={() => setShowDeleteDatasetModal(true)}
-                    className="p-1 hover:bg-red-500/20 rounded transition-colors text-red-400"
-                    title="Xóa dataset"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => exportDataset(false)}
+                      disabled={isExporting}
+                      className="p-1 hover:bg-green-500/20 rounded transition-colors text-green-400 disabled:opacity-50"
+                      title="Tải về Dataset (tất cả)"
+                    >
+                      {isExporting ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => setShowDeleteDatasetModal(true)}
+                      className="p-1 hover:bg-red-500/20 rounded transition-colors text-red-400"
+                      title="Xóa dataset"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 )}
               </div>
               <select
                 value={selectedDataset || ''}
-                onChange={(e) => { 
+                onChange={(e) => {
                   setSelectedDataset(e.target.value ? parseInt(e.target.value) : null)
                   setPage(1)
                   setCurrentSegment(null)
@@ -741,7 +808,7 @@ export default function LabelingPage() {
                 ))}
               </select>
             </div>
-            
+
             {/* Filters */}
             <div className="bg-dark-950 border border-dark-800 rounded-xl p-3 mb-3 flex-shrink-0">
               <div className="flex gap-2">
@@ -777,7 +844,7 @@ export default function LabelingPage() {
                   <RefreshCw className="w-3.5 h-3.5 text-dark-400" />
                 </button>
               </div>
-              
+
               <div className="flex-1 overflow-y-auto">
                 {loading ? (
                   <div className="p-3 space-y-2">
@@ -797,9 +864,8 @@ export default function LabelingPage() {
                       <button
                         key={segment.id}
                         onClick={() => selectSegment(segment, index)}
-                        className={`w-full px-3 py-2 text-left transition-all hover:bg-dark-900 ${
-                          currentIndex === index ? 'bg-dark-900 border-l-2 border-brand-500' : ''
-                        }`}
+                        className={`w-full px-3 py-2 text-left transition-all hover:bg-dark-900 ${currentIndex === index ? 'bg-dark-900 border-l-2 border-brand-500' : ''
+                          }`}
                       >
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-[10px] font-mono text-dark-500">#{(page - 1) * 20 + index + 1}</span>
@@ -850,22 +916,22 @@ export default function LabelingPage() {
           {/* Main Content */}
           <main className="col-span-9">
             {currentSegment ? (
-              <div className="grid grid-cols-5 gap-4 h-[calc(100vh-140px)]">
+              <div className="grid grid-cols-12 gap-4 h-[calc(100vh-140px)]">
                 {/* Left: Video Player with Timeline */}
-                <div className="col-span-2 flex flex-col">
-                  <div className="bg-dark-950 border border-dark-800 rounded-xl overflow-hidden flex-1 flex flex-col">
+                <div className="col-span-5 flex flex-col">
+                  <div className="rounded-xl overflow-hidden flex-1 flex flex-col">
                     {/* Video - Load signer video (full video containing all sentences) */}
-                    <div className="h-[260px] bg-black relative flex-shrink-0">
+                    <div className="relative w-full flex-1 overflow-hidden rounded-xl">
                       <video
-                        ref={(el) => setVideoRef(el)}
+                        ref={videoRef}
                         src={`/api/signer-video/${currentSegment.video_source}`}
-                        className="w-full h-full object-contain"
+                        className="absolute inset-0 w-full h-full object-cover"
                         onTimeUpdate={handleTimeUpdate}
                         onLoadedMetadata={handleLoadedMetadata}
                         onEnded={() => setIsPlaying(false)}
                         muted={isMuted}
                       />
-                      <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity bg-black/20">
+                      <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
                         <button
                           onClick={togglePlay}
                           className="w-14 h-14 bg-white/20 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-white/30 transition-colors"
@@ -881,156 +947,158 @@ export default function LabelingPage() {
                         {formatTime(currentTime)}
                       </div>
                     </div>
-                    
-                    {/* Timeline */}
-                    <div className="p-3 bg-dark-900/50 flex-shrink-0">
-                      <div className="relative h-10 mb-2">
-                        <div className="absolute top-4 left-0 right-0 h-2 bg-dark-700 rounded-full">
-                          <div 
-                            className="absolute top-0 h-full bg-brand-500/30 rounded-full"
-                            style={{
-                              left: `${(startTime / (videoDuration || 1)) * 100}%`,
-                              width: `${((endTime - startTime) / (videoDuration || 1)) * 100}%`
-                            }}
-                          />
-                          <div 
-                            className="absolute top-1/2 -translate-y-1/2 w-4 h-4 bg-white rounded-full shadow-lg cursor-ew-resize z-30 hover:scale-125 transition-transform"
-                            style={{ left: `calc(${(currentTime / (videoDuration || 1)) * 100}% - 8px)` }}
-                            onMouseDown={(e) => {
-                              e.preventDefault()
-                              const track = e.currentTarget.parentElement
-                              if (!track) return
-                              const rect = track.getBoundingClientRect()
-                              const handleDrag = (moveEvent: MouseEvent) => {
-                                const x = Math.max(0, Math.min(moveEvent.clientX - rect.left, rect.width))
-                                const newTime = (x / rect.width) * (videoDuration || 1)
-                                seekTo(newTime)
-                              }
-                              const handleUp = () => {
-                                document.removeEventListener('mousemove', handleDrag)
-                                document.removeEventListener('mouseup', handleUp)
-                              }
-                              document.addEventListener('mousemove', handleDrag)
-                              document.addEventListener('mouseup', handleUp)
-                            }}
-                          />
-                        </div>
-                        
-                        {/* Start Marker */}
-                        <div 
-                          className="absolute top-0 w-4 h-10 cursor-ew-resize z-10"
-                          style={{ left: `calc(${(startTime / (videoDuration || 1)) * 100}% - 8px)` }}
-                          onMouseDown={(e) => {
-                            e.preventDefault()
-                            const track = e.currentTarget.parentElement
-                            if (!track) return
-                            const rect = track.getBoundingClientRect()
-                            const handleDrag = (moveEvent: MouseEvent) => {
-                              const x = Math.max(0, Math.min(moveEvent.clientX - rect.left, rect.width))
-                              const newTime = (x / rect.width) * (videoDuration || 1)
-                              if (newTime < endTime - 0.1) {
-                                setStartTime(parseFloat(newTime.toFixed(3)))
-                              }
-                            }
-                            const handleUp = () => {
-                              document.removeEventListener('mousemove', handleDrag)
-                              document.removeEventListener('mouseup', handleUp)
-                            }
-                            document.addEventListener('mousemove', handleDrag)
-                            document.addEventListener('mouseup', handleUp)
-                          }}
-                        >
-                          <div className="w-1 h-full bg-green-500 rounded-full mx-auto" />
-                          <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-green-500" />
-                        </div>
-                        
-                        {/* End Marker */}
-                        <div 
-                          className="absolute top-0 w-4 h-10 cursor-ew-resize z-10"
-                          style={{ left: `calc(${(endTime / (videoDuration || 1)) * 100}% - 8px)` }}
-                          onMouseDown={(e) => {
-                            e.preventDefault()
-                            const track = e.currentTarget.parentElement
-                            if (!track) return
-                            const rect = track.getBoundingClientRect()
-                            const handleDrag = (moveEvent: MouseEvent) => {
-                              const x = Math.max(0, Math.min(moveEvent.clientX - rect.left, rect.width))
-                              const newTime = (x / rect.width) * (videoDuration || 1)
-                              if (newTime > startTime + 0.1) {
-                                setEndTime(parseFloat(newTime.toFixed(3)))
-                              }
-                            }
-                            const handleUp = () => {
-                              document.removeEventListener('mousemove', handleDrag)
-                              document.removeEventListener('mouseup', handleUp)
-                            }
-                            document.addEventListener('mousemove', handleDrag)
-                            document.addEventListener('mouseup', handleUp)
-                          }}
-                        >
-                          <div className="w-1 h-full bg-red-500 rounded-full mx-auto" />
-                          <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-red-500" />
-                        </div>
-                        
-                        <div 
-                          className="absolute top-2 left-0 right-0 h-6 cursor-pointer z-0"
-                          onClick={(e) => {
-                            const rect = e.currentTarget.getBoundingClientRect()
-                            const x = e.clientX - rect.left
-                            const newTime = (x / rect.width) * (videoDuration || 1)
-                            seekTo(newTime)
-                          }}
-                        />
-                      </div>
-                      
-                      <div className="flex justify-center gap-6 text-[10px] font-mono text-dark-500 mb-3">
-                        <span className="text-green-400">Start gốc: {formatTime(currentSegment.start_time)}</span>
-                        <span className="text-red-400">End gốc: {formatTime(currentSegment.end_time)}</span>
-                      </div>
-                      
-                      {/* Playback Controls */}
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-1">
-                          <button onClick={() => seekTo(Math.max(0, currentTime - 0.1))} className="p-1.5 hover:bg-dark-700 rounded-lg" title="-0.1s">
-                            <SkipBack className="w-4 h-4" />
-                          </button>
-                          <button onClick={togglePlay} className="p-2.5 bg-brand-500 hover:bg-brand-600 rounded-lg">
-                            {isPlaying ? <Pause className="w-5 h-5" fill="white" /> : <Play className="w-5 h-5 ml-0.5" fill="white" />}
-                          </button>
-                          <button onClick={() => seekTo(Math.min(videoDuration, currentTime + 0.1))} className="p-1.5 hover:bg-dark-700 rounded-lg" title="+0.1s">
-                            <SkipForward className="w-4 h-4" />
-                          </button>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button 
-                            onClick={cyclePlaybackRate}
-                            className="px-2 py-1 bg-blue-500/20 hover:bg-blue-500/30 rounded text-xs text-blue-400 font-mono min-w-[45px]"
-                          >
-                            {playbackRate}x
-                          </button>
-                          <button onClick={() => setIsMuted(!isMuted)} className="p-1.5 hover:bg-dark-700 rounded-lg">
-                            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                          </button>
-                          <button onClick={() => seekTo(startTime)} className="px-2 py-1 bg-green-500/20 hover:bg-green-500/30 rounded text-xs text-green-400">
-                            → Start
-                          </button>
-                          <button onClick={() => seekTo(endTime)} className="px-2 py-1 bg-red-500/20 hover:bg-red-500/30 rounded text-xs text-red-400">
-                            → End
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Transcript */}
-                    <div className="p-3 border-t border-dark-800 flex-1 overflow-auto">
-                      <p className="text-[10px] text-dark-500 mb-1">ASR gốc:</p>
-                      <p className="text-xs text-dark-300 leading-relaxed">{currentSegment.asr_text || 'Không có transcript'}</p>
-                    </div>
                   </div>
                 </div>
 
-                {/* Right: Annotation Form & Admin Actions */}
-                <div className="col-span-3 bg-dark-950 border border-dark-800 rounded-xl p-4 flex flex-col">
+                {/* Right: Video Controls + Annotation Form & Admin Actions */}
+                <div className="col-span-7 bg-dark-950 border border-dark-800 rounded-xl p-4 flex flex-col overflow-auto">
+                  {/* Timeline */}
+                  <div className="mb-3 flex-shrink-0">
+                    <div className="relative h-14 mb-3">
+                      <div className="absolute top-5 left-0 right-0 h-3 bg-dark-700 rounded-full">
+                        <div
+                          className="absolute top-0 h-full bg-brand-500/30 rounded-full"
+                          style={{
+                            left: `${(startTime / (videoDuration || 1)) * 100}%`,
+                            width: `${((endTime - startTime) / (videoDuration || 1)) * 100}%`
+                          }}
+                        />
+                        <div
+                          className="absolute top-1/2 -translate-y-1/2 w-5 h-5 bg-white rounded-full shadow-lg cursor-ew-resize z-30 hover:scale-125 transition-transform"
+                          style={{ left: `calc(${(currentTime / (videoDuration || 1)) * 100}% - 10px)` }}
+                          onMouseDown={(e) => {
+                            e.preventDefault()
+                            const track = e.currentTarget.parentElement
+                            if (!track) return
+                            const rect = track.getBoundingClientRect()
+                            const handleDrag = (moveEvent: MouseEvent) => {
+                              const x = Math.max(0, Math.min(moveEvent.clientX - rect.left, rect.width))
+                              const newTime = (x / rect.width) * (videoDuration || 1)
+                              seekTo(newTime)
+                            }
+                            const handleUp = () => {
+                              document.removeEventListener('mousemove', handleDrag)
+                              document.removeEventListener('mouseup', handleUp)
+                            }
+                            document.addEventListener('mousemove', handleDrag)
+                            document.addEventListener('mouseup', handleUp)
+                          }}
+                        />
+                      </div>
+
+                      {/* Start Marker */}
+                      <div
+                        className="absolute top-0 w-5 h-14 cursor-ew-resize z-10"
+                        style={{ left: `calc(${(startTime / (videoDuration || 1)) * 100}% - 10px)` }}
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          const track = e.currentTarget.parentElement
+                          if (!track) return
+                          const rect = track.getBoundingClientRect()
+                          const handleDrag = (moveEvent: MouseEvent) => {
+                            const x = Math.max(0, Math.min(moveEvent.clientX - rect.left, rect.width))
+                            const newTime = (x / rect.width) * (videoDuration || 1)
+                            if (newTime < endTime - 0.1) {
+                              setStartTime(parseFloat(newTime.toFixed(3)))
+                            }
+                          }
+                          const handleUp = () => {
+                            document.removeEventListener('mousemove', handleDrag)
+                            document.removeEventListener('mouseup', handleUp)
+                          }
+                          document.addEventListener('mousemove', handleDrag)
+                          document.addEventListener('mouseup', handleUp)
+                        }}
+                      >
+                        <div className="w-1.5 h-full bg-green-500 rounded-full mx-auto" />
+                        <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[7px] border-r-[7px] border-t-[10px] border-l-transparent border-r-transparent border-t-green-500" />
+                      </div>
+
+                      {/* End Marker */}
+                      <div
+                        className="absolute top-0 w-5 h-14 cursor-ew-resize z-10"
+                        style={{ left: `calc(${(endTime / (videoDuration || 1)) * 100}% - 10px)` }}
+                        onMouseDown={(e) => {
+                          e.preventDefault()
+                          const track = e.currentTarget.parentElement
+                          if (!track) return
+                          const rect = track.getBoundingClientRect()
+                          const handleDrag = (moveEvent: MouseEvent) => {
+                            const x = Math.max(0, Math.min(moveEvent.clientX - rect.left, rect.width))
+                            const newTime = (x / rect.width) * (videoDuration || 1)
+                            if (newTime > startTime + 0.1) {
+                              setEndTime(parseFloat(newTime.toFixed(3)))
+                            }
+                          }
+                          const handleUp = () => {
+                            document.removeEventListener('mousemove', handleDrag)
+                            document.removeEventListener('mouseup', handleUp)
+                          }
+                          document.addEventListener('mousemove', handleDrag)
+                          document.addEventListener('mouseup', handleUp)
+                        }}
+                      >
+                        <div className="w-1.5 h-full bg-red-500 rounded-full mx-auto" />
+                        <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[7px] border-r-[7px] border-t-[10px] border-l-transparent border-r-transparent border-t-red-500" />
+                      </div>
+
+                      <div
+                        className="absolute top-3 left-0 right-0 h-8 cursor-pointer z-0"
+                        onClick={(e) => {
+                          const rect = e.currentTarget.getBoundingClientRect()
+                          const x = e.clientX - rect.left
+                          const newTime = (x / rect.width) * (videoDuration || 1)
+                          seekTo(newTime)
+                        }}
+                      />
+                    </div>
+
+                    <div className="flex justify-center gap-8 text-xs font-mono text-dark-500 mb-3">
+                      <span className="text-green-400">Start gốc: {formatTime(currentSegment.start_time)}</span>
+                      <span className="text-red-400">End gốc: {formatTime(currentSegment.end_time)}</span>
+                    </div>
+
+                    {/* Playback Controls */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => seekTo(Math.max(0, currentTime - 0.1))} className="p-2 hover:bg-dark-700 rounded-lg" title="-0.1s">
+                          <SkipBack className="w-5 h-5" />
+                        </button>
+                        <button onClick={togglePlay} className="p-3 bg-brand-500 hover:bg-brand-600 rounded-xl">
+                          {isPlaying ? <Pause className="w-6 h-6" fill="white" /> : <Play className="w-6 h-6 ml-0.5" fill="white" />}
+                        </button>
+                        <button onClick={() => seekTo(Math.min(videoDuration, currentTime + 0.1))} className="p-2 hover:bg-dark-700 rounded-lg" title="+0.1s">
+                          <SkipForward className="w-5 h-5" />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={cyclePlaybackRate}
+                          className="px-3 py-1.5 bg-blue-500/20 hover:bg-blue-500/30 rounded-lg text-sm text-blue-400 font-mono min-w-[50px]"
+                        >
+                          {playbackRate}x
+                        </button>
+                        <button onClick={() => setIsMuted(!isMuted)} className="p-2 hover:bg-dark-700 rounded-lg">
+                          {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+                        </button>
+                        <button onClick={() => seekTo(startTime)} className="px-3 py-1.5 bg-green-500/20 hover:bg-green-500/30 rounded-lg text-sm text-green-400">
+                          → Start
+                        </button>
+                        <button onClick={() => seekTo(endTime)} className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 rounded-lg text-sm text-red-400">
+                          → End
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ASR Transcript */}
+                  <div className="p-2 mb-3 bg-dark-900/50 rounded-lg flex-shrink-0">
+                    <p className="text-[10px] text-dark-500 mb-0.5">ASR gốc:</p>
+                    <p className="text-xs text-dark-300 leading-relaxed">{currentSegment.asr_text || 'Không có transcript'}</p>
+                  </div>
+
+                  <hr className="border-dark-800 mb-3" />
+
                   <div className="flex items-center justify-between mb-3 flex-shrink-0">
                     <h2 className="text-base font-semibold">
                       {isAdmin ? 'Xem & Duyệt dữ liệu' : 'Căn chỉnh dữ liệu'}
@@ -1059,7 +1127,7 @@ export default function LabelingPage() {
                       <p className="text-xs text-red-300">{currentSegment.review_comment}</p>
                     </div>
                   )}
-                  
+
                   <div className="space-y-3 flex-1 overflow-auto">
                     <div className="p-2 bg-dark-900/50 rounded-lg text-xs text-dark-500 space-y-1">
                       <div className="flex gap-2"><span className="text-dark-400 flex-shrink-0">STT:</span> <span className="font-mono">#{(page - 1) * 20 + currentIndex + 1}</span></div>
@@ -1067,7 +1135,7 @@ export default function LabelingPage() {
                       <div className="flex gap-2"><span className="text-dark-400 flex-shrink-0">Duration:</span> <span className="font-mono">{currentSegment.duration?.toFixed(2)}s</span></div>
                       {currentSegment.latest_annotation?.expert_name && (
                         <div className="flex gap-2">
-                          <span className="text-dark-400 flex-shrink-0">Người gán nhãn:</span> 
+                          <span className="text-dark-400 flex-shrink-0">Người gán nhãn:</span>
                           <span className="font-mono text-brand-400">{currentSegment.latest_annotation.expert_name}</span>
                         </div>
                       )}
@@ -1164,7 +1232,7 @@ export default function LabelingPage() {
                       />
                     </div>
                   </div>
-                  
+
                   {/* Actions */}
                   <div className="mt-3 pt-3 border-t border-dark-800 flex items-center justify-between flex-shrink-0">
                     <div className="flex gap-2">
@@ -1190,7 +1258,7 @@ export default function LabelingPage() {
                         Sau <ChevronRight className="w-4 h-4" />
                       </button>
                     </div>
-                    
+
                     {/* Role-based action buttons */}
                     {isAdmin ? (
                       /* Admin: Review buttons */
@@ -1257,7 +1325,7 @@ export default function LabelingPage() {
                   {loading ? 'Đang tải dữ liệu...' : 'Không có mẫu nào'}
                 </h3>
                 <p className="text-sm text-dark-500 text-center max-w-sm">
-                  {loading 
+                  {loading
                     ? 'Vui lòng chờ trong giây lát'
                     : 'Chọn một dataset hoặc thay đổi bộ lọc để xem các segment.'
                   }
@@ -1321,7 +1389,7 @@ export default function LabelingPage() {
             <p className="text-xs text-dark-400 mb-4">
               Thao tác này sẽ xóa tất cả segments và annotations trong dataset.
             </p>
-            
+
             {/* Delete files checkbox */}
             <label className="flex items-center gap-2 mb-4 cursor-pointer">
               <input
@@ -1332,13 +1400,13 @@ export default function LabelingPage() {
               />
               <span className="text-sm text-dark-300">Xóa cả video files trên disk</span>
             </label>
-            
+
             {deleteWithFiles && (
               <div className="p-2 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-400 mb-4">
                 ⚠️ Các file video trong sentence_clips và signer_clips sẽ bị xóa vĩnh viễn
               </div>
             )}
-            
+
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => { setShowDeleteDatasetModal(false); setDeleteWithFiles(false); }}
@@ -1364,14 +1432,13 @@ export default function LabelingPage() {
 
       {/* Toast */}
       {toast && (
-        <div className={`fixed bottom-6 right-6 px-6 py-4 rounded-xl shadow-2xl toast-enter flex items-center gap-3 ${
-          toast.type === 'success' ? 'bg-green-500 text-white' : 
+        <div className={`fixed bottom-6 right-6 px-6 py-4 rounded-xl shadow-2xl toast-enter flex items-center gap-3 ${toast.type === 'success' ? 'bg-green-500 text-white' :
           toast.type === 'warning' ? 'bg-yellow-500 text-white' :
-          'bg-red-500 text-white'
-        }`}>
-          {toast.type === 'success' ? <CheckCircle className="w-5 h-5" /> : 
-           toast.type === 'warning' ? <AlertTriangle className="w-5 h-5" /> :
-           <AlertCircle className="w-5 h-5" />}
+            'bg-red-500 text-white'
+          }`}>
+          {toast.type === 'success' ? <CheckCircle className="w-5 h-5" /> :
+            toast.type === 'warning' ? <AlertTriangle className="w-5 h-5" /> :
+              <AlertCircle className="w-5 h-5" />}
           {toast.message}
         </div>
       )}

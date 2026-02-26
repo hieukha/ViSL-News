@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createReadStream, statSync, existsSync } from 'fs'
 import { join } from 'path'
 
-// Base directory cho video files
-const DATA_DIR = '/workspace/khanh/ViSL-News/data'
+// Base directory cho video files (nằm trong ViSL_tool/data/)
+const DATA_DIR = process.env.DATA_DIR || join(process.cwd(), '..', 'data')
 
 export async function GET(
   request: NextRequest,

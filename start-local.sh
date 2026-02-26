@@ -27,9 +27,9 @@ echo ""
 echo "🐍 Starting Backend..."
 cd "$DIR/backend"
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5433/visl_tool"
-export VIDEO_DIR="/workspace/khanh/ViSL-News/data/sentence_clips"
-export SIGNER_CLIPS_DIR="/workspace/khanh/ViSL-News/data/signer_clips"
-export HF_HOME="/workspace/khanh/ViSL-News/cache"
+export VIDEO_DIR="$DIR/data/sentence_clips"
+export SIGNER_CLIPS_DIR="$DIR/data/signer_clips"
+export HF_HOME="$DIR/cache"
 
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
 BACKEND_PID=$!

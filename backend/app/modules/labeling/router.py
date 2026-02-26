@@ -12,7 +12,9 @@ from typing import Optional, List
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+import subprocess
 from sqlalchemy import func, or_
 from pydantic import BaseModel
 
@@ -597,10 +599,12 @@ async def upload_zip(
                     dest_path = Path(VIDEO_DIR) / f"{clip_name}.mp4"
                     shutil.copy2(video_file, dest_path)
                     
-                    # Parse times
+                    # Parse times - use original timestamps from transcript
+                    # (start_original/end_original are the actual speech boundaries)
                     try:
-                        start_time = float(row.get('start_rounded', 0))
-                        end_time = float(row.get('end_with_buffer', row.get('end_rounded', 0)))
+                        # Prefer original timestamps, fallback to rounded if not available
+                        start_time = float(row.get('start_original', row.get('start_rounded', 0)))
+                        end_time = float(row.get('end_original', row.get('end_rounded', 0)))
                         duration = float(row.get('duration', 0))
                     except (ValueError, TypeError):
                         start_time = 0
@@ -653,3 +657,204 @@ async def upload_zip(
             "signer_videos": signer_videos_copied,
             "errors": errors[:10] if errors else []
         }
+
+
+# ============ EXPORT DATASET ============
+
+def cut_video_clip(input_path: Path, output_path: Path, start_time: float, end_time: float) -> bool:
+    """Cut a video clip using ffmpeg with precise timestamps"""
+    duration = end_time - start_time
+    if duration <= 0:
+        return False
+    
+    cmd = [
+        'ffmpeg', '-y',
+        '-ss', str(start_time),
+        '-i', str(input_path),
+        '-t', str(duration),
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '23',
+        '-c:a', 'aac',
+        '-avoid_negative_ts', 'make_zero',
+        str(output_path)
+    ]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        return result.returncode == 0 and output_path.exists()
+    except Exception as e:
+        logger.error(f"Error cutting video: {e}")
+        return False
+
+
+@router.get("/datasets/{dataset_id}/export")
+async def export_dataset(
+    dataset_id: int,
+    include_reviewed_only: bool = Query(False, description="Chỉ export các segment đã được duyệt"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """
+    Export dataset với video đã cắt lại theo timestamps từ annotation.
+    
+    Trả về file ZIP với cấu trúc:
+    - sentence_clips/: Video clips đã cắt theo annotation
+    - signer_clips/: Video gốc của signer  
+    - sentence_clips_metadata.csv: Metadata đã cập nhật
+    """
+    # Get dataset
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset không tồn tại")
+    
+    # Get segments with their latest annotations
+    query = db.query(Segment).filter(Segment.dataset_id == dataset_id)
+    
+    if include_reviewed_only:
+        query = query.filter(Segment.status == 'reviewed')
+    
+    segments = query.order_by(Segment.id).all()
+    
+    if not segments:
+        raise HTTPException(status_code=400, detail="Dataset không có segment nào")
+    
+    # Create temp directory for export
+    export_dir = Path(tempfile.mkdtemp(prefix=f"export_{dataset.name}_"))
+    clips_dir = export_dir / "sentence_clips"
+    signer_dir = export_dir / "signer_clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    signer_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Prepare CSV data
+        csv_rows = []
+        exported_count = 0
+        skipped_count = 0
+        signer_videos_exported = set()
+        
+        for segment in segments:
+            # Get latest annotation if exists
+            latest_annotation = None
+            if segment.annotations:
+                latest_annotation = segment.annotations[0]  # Already ordered by desc(version)
+            
+            # Determine timestamps to use
+            if latest_annotation:
+                # Use annotated timestamps
+                start_time = float(latest_annotation.start_time) if latest_annotation.start_time else float(segment.start_time)
+                end_time = float(latest_annotation.end_time) if latest_annotation.end_time else float(segment.end_time)
+                final_text = latest_annotation.final_text or segment.asr_text or ''
+                gloss_sequence = latest_annotation.gloss_sequence or ''
+            else:
+                # Use original timestamps
+                start_time = float(segment.start_time)
+                end_time = float(segment.end_time)
+                final_text = segment.asr_text or ''
+                gloss_sequence = ''
+            
+            duration = end_time - start_time
+            
+            # Find source signer video
+            signer_video_name = segment.video_source
+            signer_video_path = Path(SIGNER_CLIPS_DIR) / signer_video_name
+            
+            if not signer_video_path.exists():
+                logger.warning(f"Signer video not found: {signer_video_path}")
+                skipped_count += 1
+                continue
+            
+            # Copy signer video if not already exported
+            if signer_video_name not in signer_videos_exported:
+                dest_signer = signer_dir / signer_video_name
+                shutil.copy2(signer_video_path, dest_signer)
+                signer_videos_exported.add(signer_video_name)
+            
+            # Cut the clip with new timestamps
+            output_clip = clips_dir / f"{segment.clip_name}.mp4"
+            success = cut_video_clip(signer_video_path, output_clip, start_time, end_time)
+            
+            if not success:
+                logger.warning(f"Failed to cut clip: {segment.clip_name}")
+                skipped_count += 1
+                continue
+            
+            # Add to CSV
+            csv_rows.append({
+                'name': segment.clip_name,
+                'video_source': signer_video_name,
+                'segment_id': segment.segment_id or 0,
+                'start_original': start_time,
+                'start_rounded': int(start_time) + 1 if start_time % 1 > 0 else int(start_time),
+                'end_original': end_time,
+                'end_rounded': int(end_time) + 1 if end_time % 1 > 0 else int(end_time),
+                'end_with_buffer': end_time,  # No buffer for exported data
+                'duration': round(duration, 3),
+                'is_last_segment': segment.is_last_segment,
+                'text': final_text,
+                'gloss': gloss_sequence,
+                'status': 'success',
+                'signer_id': segment.signer_id or 0,
+                'split': segment.split or 'train',
+                'annotation_status': segment.status,
+            })
+            exported_count += 1
+        
+        if exported_count == 0:
+            shutil.rmtree(export_dir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail="Không có segment nào được export thành công")
+        
+        # Write CSV
+        csv_path = export_dir / "sentence_clips_metadata.csv"
+        fieldnames = [
+            'name', 'video_source', 'segment_id', 'start_original', 'start_rounded',
+            'end_original', 'end_rounded', 'end_with_buffer', 'duration',
+            'is_last_segment', 'text', 'gloss', 'status', 'signer_id', 'split', 'annotation_status'
+        ]
+        
+        with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(csv_rows)
+        
+        # Create ZIP file
+        zip_filename = f"{dataset.name}_exported_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        zip_path = export_dir / zip_filename
+        
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Add sentence clips
+            for clip_file in clips_dir.glob("*.mp4"):
+                zipf.write(clip_file, f"sentence_clips/{clip_file.name}")
+            
+            # Add signer clips
+            for signer_file in signer_dir.glob("*.mp4"):
+                zipf.write(signer_file, f"signer_clips/{signer_file.name}")
+            
+            # Add CSV
+            zipf.write(csv_path, "sentence_clips_metadata.csv")
+        
+        logger.info(f"Export completed: {exported_count} clips, {len(signer_videos_exported)} signer videos")
+        
+        # Copy ZIP to a more permanent location for download
+        final_zip_dir = Path(DATA_DIR) / "exports"
+        final_zip_dir.mkdir(parents=True, exist_ok=True)
+        final_zip_path = final_zip_dir / zip_filename
+        shutil.copy2(zip_path, final_zip_path)
+        
+        # Clean up temp directory
+        shutil.rmtree(export_dir, ignore_errors=True)
+        
+        # Return file response
+        return FileResponse(
+            path=final_zip_path,
+            filename=zip_filename,
+            media_type="application/zip"
+        )
+        
+    except HTTPException:
+        shutil.rmtree(export_dir, ignore_errors=True)
+        raise
+    except Exception as e:
+        shutil.rmtree(export_dir, ignore_errors=True)
+        logger.error(f"Export error: {e}")
+        raise HTTPException(status_code=500, detail=f"Lỗi export: {str(e)}")
