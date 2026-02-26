@@ -55,3 +55,7 @@ logs/
 # Data
 data/
 cache/
+
+# Cloudflare tunnel credentials (sensitive)
+cloudflare/volumes/*.json
+cloudflare/volumes/*.pem

@@ -1,0 +1,7 @@
+tunnel: b3180e8d-167c-40f9-9465-7f3bce5eb870
+credentials-file: /home/nonroot/.cloudflared/b3180e8d-167c-40f9-9465-7f3bce5eb870.json
+
+ingress:
+  - hostname: visl.site
+    service: http://localhost:3001
+  - service: http_status:404

@@ -1,0 +1,9 @@
+services:
+  cloudflare:
+    image: cloudflare/cloudflared:2026.1.2
+    container_name: cloudflare
+    volumes: 
+      - ./volumes:/home/nonroot/.cloudflared 
+    restart: unless-stopped
+    network_mode: host 
+    command: tunnel run visl-news-tunnel
